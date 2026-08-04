@@ -9,7 +9,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from .dataset import assign_splits, build_example, validate_example, write_manifest
+from .dataset import assign_splits, build_example, import_example, validate_example, write_manifest
 from .render import RenderError, RenderSettings, fluidsynth_version
 from .rppread import read_project
 
@@ -30,8 +30,26 @@ def main(argv: list[str] | None = None) -> int:
     check = sub.add_parser("check", help="re-run the contract checks on an existing dataset")
     check.add_argument("dataset", type=Path, help="dataset root containing manifest.jsonl")
 
+    imp = sub.add_parser(
+        "import",
+        help="pair already-rendered WAVs with labels extracted from their RPP -- no rendering",
+    )
+    imp.add_argument("source", type=Path,
+                     help="directory containing <name>.RPP + <name>.wav pairs, or a single RPP")
+    imp.add_argument("-o", "--out", type=Path, required=True, help="dataset root")
+    imp.add_argument("--test-fraction", type=float, default=0.2)
+    imp.add_argument("--renderer", default="REAPER (manual render)",
+                     help="free-text description recorded in the manifest")
+    imp.add_argument("--exceptions", type=Path,
+                     help="JSON file of approved out-of-range pitches, keyed by "
+                          "source_midi_id -- see DATA_CONTRACT.md's pitch range exception")
+
     args = parser.parse_args(argv)
-    return _check(args) if args.command == "check" else _build(args)
+    if args.command == "check":
+        return _check(args)
+    if args.command == "import":
+        return _import(args)
+    return _build(args)
 
 
 def _collect(items: list[Path]) -> list[Path]:
@@ -67,7 +85,7 @@ def _build(args: argparse.Namespace) -> int:
         for index, path in enumerate(paths, start=1):
             project = read_project(path)
             if not project.parts:
-                print(f"SKIP    {path.name}: no SFLT parts found")
+                print(f"SKIP    {path.name}: no canonically named parts found")
                 failures += 1
                 continue
 
@@ -96,6 +114,59 @@ def _build(args: argparse.Namespace) -> int:
 
     clean = sum(1 for e in examples if not e.problems)
     print(f"\n{len(examples)} example(s) written to {args.out} "
+          f"({clean} clean, {len(examples) - clean} with problems, {failures} failed)")
+    return 1 if failures or clean != len(examples) else 0
+
+
+def _import(args: argparse.Namespace) -> int:
+    exceptions: dict[str, dict] = {}
+    if args.exceptions:
+        if not args.exceptions.exists():
+            print(f"no exceptions file at {args.exceptions}", file=sys.stderr)
+            return 2
+        exceptions = json.loads(args.exceptions.read_text())
+
+    rpp_files = sorted(args.source.rglob("*.RPP")) if args.source.is_dir() else [args.source]
+    pairs: list[tuple[Path, Path]] = []
+    for rpp in rpp_files:
+        wav = rpp.with_suffix(".wav")
+        if not wav.exists():
+            print(f"SKIP    {rpp.name}: no matching .wav next to it")
+            continue
+        pairs.append((rpp, wav))
+
+    if not pairs:
+        print("no RPP/WAV pairs found", file=sys.stderr)
+        return 2
+
+    splits = assign_splits([rpp.stem for rpp, _ in pairs], args.test_fraction)
+    examples, failures = [], 0
+
+    for index, (rpp, wav) in enumerate(pairs, start=1):
+        project = read_project(rpp)
+        if not project.parts:
+            print(f"SKIP    {rpp.name}: no canonically named parts found")
+            failures += 1
+            continue
+
+        example_id = f"ex_{index:04d}"
+        split = splits[project.name]
+        example = import_example(project, wav, args.out, example_id, split, args.renderer,
+                                 pitch_exceptions=exceptions.get(project.name))
+        examples.append(example)
+        print(f"{'OK  ' if not example.problems else 'PROB'}    {example_id} [{split}] "
+              f"{rpp.stem[:40]:<40} {len(project.parts)} parts")
+        for problem in example.problems:
+            print(f"          {problem}")
+        if project.unparsed_tracks:
+            for name in project.unparsed_tracks:
+                print(f"          skipped track: {name[:70]}")
+
+    if examples:
+        write_manifest(examples, args.out / "manifest.jsonl")
+
+    clean = sum(1 for e in examples if not e.problems)
+    print(f"\n{len(examples)} example(s) imported to {args.out} "
           f"({clean} clean, {len(examples) - clean} with problems, {failures} failed)")
     return 1 if failures or clean != len(examples) else 0
 

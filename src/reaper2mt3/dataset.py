@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,13 @@ from .sf2 import read_presets
 
 PITCH_MIN, PITCH_MAX = 21, 108
 PERCUSSION_MIN, PERCUSSION_MAX = 27, 87
+CONTRACT_SAMPLE_RATE = 44100
+CONTRACT_CHANNELS = 1
+# A render ending far short of the performance is very likely truncated; one
+# far past it is very likely misalignment (wrong file, doubled render). Both
+# are worth flagging, but neither is a hard contract number to derive from.
+MIN_TAIL_SECONDS = -0.5
+MAX_TAIL_SECONDS = 30.0
 
 
 @dataclass
@@ -129,6 +137,67 @@ def build_example(
     return Example(example_id, split, record, validate_example(record, out_root))
 
 
+def import_example(
+    project: Project,
+    wav_path: Path,
+    out_root: Path,
+    example_id: str,
+    split: str,
+    renderer: str,
+    pitch_exceptions: dict[str, dict] | None = None,
+) -> Example:
+    """Pair a manually rendered WAV with labels extracted from its project.
+
+    No audio is synthesized here -- `render.py` and its FluidSynth invocation
+    are not touched. The WAV is copied byte-for-byte; only the corpus MIDI is
+    generated, from the RPP's canonical track names and note data.
+
+    `pitch_exceptions` is DATA_CONTRACT.md's escape hatch for material outside
+    the accepted pitch range: `{"<track_name>": {"extra_pitches": [...],
+    "reason": "..."}}`. It is written into the manifest record verbatim, so the
+    approval is auditable and travels with the data -- a later `reaper2mt3
+    check` reads it back from the record rather than needing to be told again.
+    """
+    midi_path = Path("midi") / split / f"{example_id}.mid"
+    audio_path = Path("audio") / split / f"{example_id}.wav"
+
+    write_corpus_midi(project, out_root / midi_path)
+    dest = out_root / audio_path
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(wav_path, dest)
+
+    performance_seconds = project.seconds_at(project.last_tick)
+    with wave.open(str(dest)) as handle:
+        rate = handle.getframerate()
+        duration_seconds = handle.getnframes() / rate if rate else 0.0
+
+    record = {
+        "id": example_id,
+        "split": split,
+        "audio_path": str(audio_path),
+        "midi_path": str(midi_path),
+        # Contract targets, not measurements -- _check_audio compares the
+        # actual file against these and reports the mismatch if there is one.
+        "sample_rate_hz": CONTRACT_SAMPLE_RATE,
+        "channels": CONTRACT_CHANNELS,
+        "source_midi_id": project.name,
+        "source_project": str(project.path),
+        "source_project_sha256": _sha256(project.path),
+        "source_audio": str(wav_path),
+        "source_audio_sha256": _sha256(wav_path),
+        "parts": [_part_record(part) for part in project.parts],
+        "skipped_tracks": [{"name": name, "reason": "track name did not parse canonically"}
+                           for name in project.unparsed_tracks],
+        "renderer": renderer,
+        "performance_seconds": round(performance_seconds, 3),
+        "duration_seconds": round(duration_seconds, 3),
+        "tail_seconds": round(duration_seconds - performance_seconds, 3),
+        "normalization": "manual: REAPER master fader, no automated peak normalization",
+        "approved_exceptions": pitch_exceptions or {},
+    }
+    return Example(example_id, split, record, validate_example(record, out_root))
+
+
 def _part_record(part: ProjectPart) -> dict:
     return {
         "track_name": part.canonical_name,
@@ -136,9 +205,10 @@ def _part_record(part: ProjectPart) -> dict:
         "is_drum": part.is_drum,
         "rhythm": part.rhythm,
         "note_count": part.note_count,
-        "soundfont": str(part.soundfont),
+        "soundfont": str(part.soundfont) if part.soundfont else None,
         "bank": part.bank,
         "patch": part.patch,
+        "instrument_plugins": part.instrument_plugins,
         "reaper_track_name": part.track_name,
     }
 
@@ -164,17 +234,25 @@ def validate_example(record: dict, out_root: Path) -> list[str]:
         if part["track_name"] != expected:
             problems.append(f"check 2: {part['track_name']} is not canonical ({expected})")
 
-        soundfont = Path(part["soundfont"])
-        if not soundfont.exists():
-            problems.append(f"check 10: missing soundfont {soundfont}")
-        else:
-            presets = read_presets(soundfont)
-            if presets is None:
-                problems.append(f"check 10: unreadable soundfont {soundfont.name}")
-            elif not any(x.bank == part["bank"] and x.patch == part["patch"] for x in presets):
-                problems.append(
-                    f"check 10: {soundfont.name} lacks bank {part['bank']} patch {part['patch']}"
-                )
+        # A part is driven by either an SFLT soundfont or a real instrument
+        # chain; check 10 verifies whichever one it actually has, and only
+        # flags a part with neither, since that means nothing is really
+        # producing its sound.
+        if part["soundfont"] is not None:
+            soundfont = Path(part["soundfont"])
+            if not soundfont.exists():
+                problems.append(f"check 10: missing soundfont {soundfont}")
+            else:
+                presets = read_presets(soundfont)
+                if presets is None:
+                    problems.append(f"check 10: unreadable soundfont {soundfont.name}")
+                elif not any(x.bank == part["bank"] and x.patch == part["patch"] for x in presets):
+                    problems.append(
+                        f"check 10: {soundfont.name} lacks bank {part['bank']} patch {part['patch']}"
+                    )
+        elif not part.get("instrument_plugins"):
+            problems.append(f"check 10: {part['track_name']} has neither a soundfont "
+                            "nor an identifiable instrument chain")
 
     midi_path = out_root / record["midi_path"]
     audio_path = out_root / record["audio_path"]
@@ -182,7 +260,7 @@ def validate_example(record: dict, out_root: Path) -> list[str]:
     if not midi_path.exists():
         problems.append("check 7: MIDI missing")
     else:
-        problems += _check_midi(midi_path, parts)
+        problems += _check_midi(midi_path, parts, record.get("approved_exceptions", {}))
 
     if not audio_path.exists():
         problems.append("check 6: WAV missing")
@@ -192,13 +270,23 @@ def validate_example(record: dict, out_root: Path) -> list[str]:
     if not record.get("renderer") or not record.get("normalization"):
         problems.append("check 11: renderer or normalization metadata missing")
 
+    if "tail_seconds" in record:
+        tail = record["tail_seconds"]
+        if tail < MIN_TAIL_SECONDS:
+            problems.append(f"check 12: audio ends {-tail:.2f}s before the last note-off "
+                            "-- likely truncated")
+        elif tail > MAX_TAIL_SECONDS:
+            problems.append(f"check 12: audio runs {tail:.2f}s past the last note-off "
+                            "-- check for misalignment")
+
     return problems
 
 
-def _check_midi(path: Path, parts: list[dict]) -> list[str]:
+def _check_midi(path: Path, parts: list[dict], pitch_exceptions: dict[str, dict] | None = None) -> list[str]:
     problems: list[str] = []
     midi = mido.MidiFile(str(path))
     by_name = {p["track_name"]: p for p in parts}
+    exceptions = pitch_exceptions or {}
     seen: dict[str, int] = {}
 
     for track in midi.tracks:
@@ -223,7 +311,8 @@ def _check_midi(path: Path, parts: list[dict]) -> list[str]:
         notes = [m.note for m in track if m.type == "note_on" and m.velocity > 0]
         seen[name] = len(notes)
         low, high = (PERCUSSION_MIN, PERCUSSION_MAX) if part["is_drum"] else (PITCH_MIN, PITCH_MAX)
-        out_of_range = [n for n in notes if not low <= n <= high]
+        allowed_extra = set(exceptions.get(name, {}).get("extra_pitches", []))
+        out_of_range = [n for n in notes if not low <= n <= high and n not in allowed_extra]
         if out_of_range:
             problems.append(f"check 8: {name} has {len(out_of_range)} notes outside {low}-{high}")
 

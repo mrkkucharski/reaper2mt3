@@ -23,6 +23,23 @@ SFLT_MARKER = '<VST "VST3i: SFLT'
 B64_LINE_WIDTH = 128
 _EVENT = re.compile(r"^[Ee]\s+(\d+)\s+([0-9a-fA-F]{2})\s+([0-9a-fA-F]{2})\s+([0-9a-fA-F]{2})\s*$")
 
+# A part is now identified by its track name, not by finding an SFLT instance:
+# midi2reaper splices real instrument FX chains (Kontakt, Guitar Rig, Ample
+# Bass...) in place of SFLT wherever a tuned chain exists, and a reader that
+# only recognized SFLT silently dropped every one of those tracks. The name
+# stays the identifier and one instrument name is captured for provenance
+# regardless of which plugin family produced it.
+_PLUGIN_LINE = re.compile(r'^<(VST|JS|AU|CLAP)\s+(?:"([^"]*)"|(\S+))')
+_FORMAT_PREFIX = re.compile(r"^(VST3i?|VSTi?|AUi?|CLAPi?):\s*")
+
+
+def _plugin_name(line: str) -> str | None:
+    match = _PLUGIN_LINE.match(line.strip())
+    if not match:
+        return None
+    name = match.group(2) if match.group(2) is not None else match.group(3)
+    return _FORMAT_PREFIX.sub("", name.strip())
+
 
 @dataclass(frozen=True)
 class Note:
@@ -38,10 +55,13 @@ class ProjectPart:
     track_name: str
     program: int | None
     is_drum: bool
-    rhythm: bool
-    soundfont: Path
-    bank: int
-    patch: int
+    rhythm: bool | None
+    # Present only for an SFLT-backed part. A part driven by a real instrument
+    # chain carries none of these; `instrument_plugins` is its provenance instead.
+    soundfont: Path | None
+    bank: int | None
+    patch: int | None
+    instrument_plugins: list[str] = field(default_factory=list)
     notes: list[Note] = field(default_factory=list)
 
     @property
@@ -131,18 +151,22 @@ def read_project(path: Path) -> Project:
             tempo_points.append((float(bits[0 + 1]), float(bits[2])))
         elif stripped.startswith("<TRACK "):
             _flush(parts, unparsed, pending, track_name)
-            track_name, pending = None, None
+            # Initialized as soon as a track starts, not on first SFLT sighting,
+            # so a track driven by any other plugin still gets its notes read.
+            track_name, pending = None, {}
         elif stripped.startswith("NAME ") and track_name is None:
             track_name = _unquote(stripped[5:].strip())
-        elif stripped.startswith(SFLT_MARKER):
+        elif stripped.startswith(SFLT_MARKER) and pending is not None:
             payload, i = _collect_chunk(lines, i)
             state = _decode_state(payload)["fields"]
             if state["file"] != "null":
-                pending = {
-                    "soundfont": Path(json.loads(state["file"])),
-                    "bank": int(float(state["bank"])),
-                    "patch": int(float(state["patch"])),
-                }
+                pending["soundfont"] = Path(json.loads(state["file"]))
+                pending["bank"] = int(float(state["bank"]))
+                pending["patch"] = int(float(state["patch"]))
+        elif stripped.startswith(("<VST", "<JS", "<AU", "<CLAP")) and pending is not None:
+            name = _plugin_name(stripped)
+            if name:
+                pending.setdefault("plugins", []).append(name)
         elif stripped.startswith("HASDATA "):
             bits = stripped.split()
             if len(bits) >= 3 and bits[2].isdigit():
@@ -171,6 +195,8 @@ def read_project(path: Path) -> Project:
 
 def _flush(parts, unparsed, pending, track_name) -> None:
     if pending is None:
+        # No <TRACK block was ever opened for this name -- happens only before
+        # the first track in the file, where track_name is also always None.
         if track_name:
             unparsed.append(track_name)
         return
@@ -185,9 +211,10 @@ def _flush(parts, unparsed, pending, track_name) -> None:
             program=program,
             is_drum=is_drum,
             rhythm=rhythm,
-            soundfont=pending["soundfont"],
-            bank=pending["bank"],
-            patch=pending["patch"],
+            soundfont=pending.get("soundfont"),
+            bank=pending.get("bank"),
+            patch=pending.get("patch"),
+            instrument_plugins=pending.get("plugins", []),
             notes=sorted(pending.get("notes", []), key=lambda n: n.start),
         )
     )
