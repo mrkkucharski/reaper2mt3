@@ -67,31 +67,49 @@ def is_guitar(program: int | None) -> bool:
     return program is not None and program in GUITAR_PROGRAMS
 
 
-def track_name(program: int | None, is_drum: bool, rhythm: bool) -> str:
-    """Canonical `<slug>:<role>` name required by DATA_CONTRACT.md."""
+def track_name(program: int | None, is_drum: bool, rhythm: bool | None) -> str:
+    """Canonical part name required by DATA_CONTRACT.md.
+
+    Guitars are named `<slug>:<role>`; everything else is named `<slug>` alone,
+    because role is a guitar-only annotation. The absence of a colon is what
+    says "this part takes no role", so it is not an omission to tidy up.
+    """
     part = DRUM_SLUG if is_drum else program_slug(program)
+    if rhythm is None:
+        return part
     return f"{part}:{'rhythm' if rhythm else 'lead'}"
 
 
 _SLUG_TO_PROGRAM = {program_slug(p): p for p in range(128)}
 
 
-def parse_track_name(name: str) -> tuple[int | None, bool, bool] | None:
+def parse_track_name(name: str) -> tuple[int | None, bool, bool | None] | None:
     """Inverse of `track_name`: returns (program, is_drum, rhythm).
 
-    Only the canonical prefix is read, so anything appended for human benefit —
-    the source track, a `[vocal→instrument]` marker — is ignored and a project
-    renamed in REAPER still parses.
+    `rhythm` is None for a part that carries no role. Only the canonical prefix
+    is read, so anything appended for human benefit — the source track, a
+    `[vocal→instrument]` marker — is ignored and a project renamed in REAPER
+    still parses.
     """
     head = name.split("|", 1)[0].strip()
-    slug_part, _, role = head.partition(":")
-    role = role.strip().split()[0] if role.strip() else ""
-    if role not in ("rhythm", "lead"):
-        return None
+    slug_part, separator, role = head.partition(":")
     slug_part = slug_part.strip()
+
+    if separator:
+        role = role.strip().split()[0] if role.strip() else ""
+        if role not in ("rhythm", "lead"):
+            return None
+        rhythm: bool | None = role == "rhythm"
+    else:
+        rhythm = None
+
     if slug_part == DRUM_SLUG:
-        return None, True, role == "rhythm"
+        # Percussion is not a guitar, so it may not carry a role either.
+        return (None, True, None) if rhythm is None else None
     program = _SLUG_TO_PROGRAM.get(slug_part)
     if program is None:
         return None
-    return program, False, role == "rhythm"
+    # Only guitars may carry a role, and a guitar without one is unlabelled.
+    if (rhythm is not None) != is_guitar(program):
+        return None
+    return program, False, rhythm

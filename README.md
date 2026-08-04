@@ -98,9 +98,15 @@ carries the label, never the patch.
 
 ### The track-name interface
 
-REAPER track names are the contract between the two repos. Each part is titled
-`<slug>:<role>` — `distortion-guitar:rhythm`, `tenor-sax:lead`, `drums:rhythm` —
-optionally followed by ` | ` and anything human-readable, which is ignored.
+REAPER track names are the contract between the two repos. A **guitar** part is
+titled `<slug>:<role>` — `distortion-guitar:rhythm` — and **every other** part
+is titled `<slug>` alone — `tenor-sax`, `electric-bass-finger`, `drums`. Either
+may be followed by ` | ` and anything human-readable, which is ignored.
+
+Role is a guitar-only annotation, so the missing colon is meaningful rather than
+an omission. A role on a non-guitar (`tenor-sax:rhythm`) and a guitar without one
+(`distortion-guitar`) are both rejected as corrupt labels rather than accepted
+quietly.
 
 The two repos share no code, so `tests/test_names.py` pins the grammar against
 names taken verbatim from generated projects, checks all 128 programs

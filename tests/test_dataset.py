@@ -31,15 +31,18 @@ def part(program, is_drum=False, rhythm=True, patch=0, notes=None):
     )
 
 
-@pytest.mark.parametrize("program,is_drum,rhythm", [(30, False, True), (66, False, False), (None, True, True)])
+@pytest.mark.parametrize(
+    "program,is_drum,rhythm",
+    [(30, False, True), (27, False, False), (66, False, None), (None, True, None)],
+)
 def test_track_name_round_trips(program, is_drum, rhythm):
     name = gm.track_name(program, is_drum, rhythm)
     assert gm.parse_track_name(name) == (program, is_drum, rhythm)
 
 
 def test_track_name_parses_with_human_suffix():
-    name = "tenor-sax:lead | Kurt Cobain | Vocals [vocal→instrument]"
-    assert gm.parse_track_name(name) == (66, False, False)
+    name = "tenor-sax | Kurt Cobain | Vocals [vocal→instrument]"
+    assert gm.parse_track_name(name) == (66, False, None)
 
 
 def test_unknown_track_name_rejected():
