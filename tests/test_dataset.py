@@ -33,7 +33,7 @@ def part(program, is_drum=False, rhythm=True, patch=0, notes=None):
 
 @pytest.mark.parametrize(
     "program,is_drum,rhythm",
-    [(30, False, True), (27, False, False), (66, False, None), (None, True, None)],
+    [(30, False, True), (27, False, None), (66, False, None), (None, True, None)],
 )
 def test_track_name_round_trips(program, is_drum, rhythm):
     name = gm.track_name(program, is_drum, rhythm)

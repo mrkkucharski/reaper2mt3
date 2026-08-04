@@ -5,8 +5,8 @@ REAPER track titles, and this tool, which reads them back as training labels.
 The two repos share no code, so a silent change to either side would mis-label
 a corpus rather than fail loudly. These cases fix the grammar in place.
 
-Guitars are named `<slug>:<role>`; every other part is named `<slug>` alone,
-because role is a guitar-only annotation.
+A guitar playing chordal accompaniment is named `<slug>:rhythm`; every other
+part is named `<slug>` alone. There is deliberately no `lead`.
 """
 
 import pytest
@@ -16,28 +16,28 @@ from reaper2mt3 import gm
 # Names taken verbatim from projects midi2reaper generated.
 REAL_TRACK_NAMES = [
     ("acoustic-grand-piano", 0, False, None),
-    ("acoustic-guitar-nylon:lead", 24, False, False),
+    ("acoustic-guitar-nylon", 24, False, None),
     ("acoustic-guitar-nylon:rhythm", 24, False, True),
-    ("acoustic-guitar-steel:lead", 25, False, False),
+    ("acoustic-guitar-steel", 25, False, None),
     ("acoustic-guitar-steel:rhythm", 25, False, True),
     ("choir-aahs", 52, False, None),
     ("clarinet", 71, False, None),
-    ("distortion-guitar:lead", 30, False, False),
+    ("distortion-guitar", 30, False, None),
     ("distortion-guitar:rhythm", 30, False, True),
     ("drawbar-organ", 16, False, None),
     ("drums", None, True, None),
     ("electric-bass-finger", 33, False, None),
     ("electric-bass-pick", 34, False, None),
-    ("electric-guitar-clean:lead", 27, False, False),
+    ("electric-guitar-clean", 27, False, None),
     ("electric-guitar-clean:rhythm", 27, False, True),
-    ("electric-guitar-jazz:lead", 26, False, False),
+    ("electric-guitar-jazz", 26, False, None),
     ("electric-guitar-jazz:rhythm", 26, False, True),
     ("electric-piano-1", 4, False, None),
     ("fretless-bass", 35, False, None),
     ("lead-3-calliope", 82, False, None),
     ("lead-8-bass-plus-lead", 87, False, None),
     ("orchestral-harp", 46, False, None),
-    ("overdriven-guitar:lead", 29, False, False),
+    ("overdriven-guitar", 29, False, None),
     ("overdriven-guitar:rhythm", 29, False, True),
     ("recorder", 74, False, None),
     ("rock-organ", 18, False, None),
@@ -61,13 +61,11 @@ def test_names_are_reproduced_exactly(name, program, is_drum, rhythm):
 
 @pytest.mark.parametrize("program", range(128))
 def test_every_program_round_trips(program):
+    name = gm.track_name(program, False, None)
+    assert gm.parse_track_name(name) == (program, False, None)
     if gm.is_guitar(program):
-        for rhythm in (True, False):
-            name = gm.track_name(program, False, rhythm)
-            assert gm.parse_track_name(name) == (program, False, rhythm)
-    else:
-        name = gm.track_name(program, False, None)
-        assert gm.parse_track_name(name) == (program, False, None)
+        annotated = gm.track_name(program, False, True)
+        assert gm.parse_track_name(annotated) == (program, False, True)
 
 
 def test_slugs_are_unique_across_all_programs():
@@ -77,8 +75,8 @@ def test_slugs_are_unique_across_all_programs():
 
 
 def test_human_suffix_is_ignored():
-    name = "electric-guitar-clean:lead | John Frusciante | Gretsch White Falcon"
-    assert gm.parse_track_name(name) == (27, False, False)
+    name = "electric-guitar-clean:rhythm | John Frusciante | Gretsch White Falcon"
+    assert gm.parse_track_name(name) == (27, False, True)
 
 
 def test_vocal_marker_suffix_is_ignored():
@@ -90,14 +88,24 @@ def test_unparseable_names_are_rejected(name):
     assert gm.parse_track_name(name) is None
 
 
-@pytest.mark.parametrize("name", ["tenor-sax:rhythm", "drums:rhythm", "acoustic-grand-piano:lead"])
-def test_role_on_a_non_guitar_is_rejected(name):
-    """Role is guitar-only, so a role on anything else is a corrupt label rather
+@pytest.mark.parametrize("name", ["tenor-sax:rhythm", "drums:rhythm", "acoustic-grand-piano:rhythm"])
+def test_rhythm_on_a_non_guitar_is_rejected(name):
+    """rhythm is guitar-only, so it on anything else is a corrupt label rather
     than something to accept quietly."""
     assert gm.parse_track_name(name) is None
 
 
-@pytest.mark.parametrize("name", ["electric-guitar-clean", "distortion-guitar"])
-def test_guitar_without_a_role_is_rejected(name):
-    """Guitars must carry a role; one without is equally a corrupt label."""
+@pytest.mark.parametrize(
+    "name", ["electric-guitar-clean:lead", "distortion-guitar:lead", "tenor-sax:lead"]
+)
+def test_lead_is_not_part_of_the_grammar(name):
+    """Absence of `:rhythm` is the only way a part says it is not accompaniment;
+    an explicit `:lead` is a label from an older grammar and is rejected."""
     assert gm.parse_track_name(name) is None
+
+
+@pytest.mark.parametrize("name", ["electric-guitar-clean", "distortion-guitar"])
+def test_unannotated_guitar_is_valid(name):
+    """A guitar that is not chordal accompaniment simply carries no annotation."""
+    program, is_drum, rhythm = gm.parse_track_name(name)
+    assert gm.is_guitar(program) and not is_drum and rhythm is None
