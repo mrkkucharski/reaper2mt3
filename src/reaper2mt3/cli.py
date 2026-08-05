@@ -32,10 +32,12 @@ def main(argv: list[str] | None = None) -> int:
 
     imp = sub.add_parser(
         "import",
-        help="pair already-rendered WAVs with labels extracted from their RPP -- no rendering",
+        help="pair already-rendered audio (WAV or FLAC) with labels extracted from their RPP "
+             "-- no rendering",
     )
     imp.add_argument("source", type=Path,
-                     help="directory containing <name>.RPP + <name>.wav pairs, or a single RPP")
+                     help="directory containing <name>.RPP + <name>.wav/.flac pairs, "
+                          "or a single RPP")
     imp.add_argument("-o", "--out", type=Path, required=True, help="dataset root")
     imp.add_argument("--test-fraction", type=float, default=0.2)
     imp.add_argument("--renderer", default="REAPER (manual render)",
@@ -118,6 +120,21 @@ def _build(args: argparse.Namespace) -> int:
     return 1 if failures or clean != len(examples) else 0
 
 
+AUDIO_EXTENSIONS = (".wav", ".flac")
+
+
+def _find_audio(rpp: Path) -> Path | None:
+    """The audio next to an RPP, whichever supported format it was rendered
+    in. Checked in this order, so a project with both (e.g. re-rendered from
+    WAV to FLAC without removing the old file) deterministically picks WAV,
+    matching the format every pre-FLAC project already uses."""
+    for ext in AUDIO_EXTENSIONS:
+        candidate = rpp.with_suffix(ext)
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def _import(args: argparse.Namespace) -> int:
     exceptions: dict[str, dict] = {}
     if args.exceptions:
@@ -129,20 +146,20 @@ def _import(args: argparse.Namespace) -> int:
     rpp_files = sorted(args.source.rglob("*.RPP")) if args.source.is_dir() else [args.source]
     pairs: list[tuple[Path, Path]] = []
     for rpp in rpp_files:
-        wav = rpp.with_suffix(".wav")
-        if not wav.exists():
-            print(f"SKIP    {rpp.name}: no matching .wav next to it")
+        audio = _find_audio(rpp)
+        if audio is None:
+            print(f"SKIP    {rpp.name}: no matching .wav or .flac next to it")
             continue
-        pairs.append((rpp, wav))
+        pairs.append((rpp, audio))
 
     if not pairs:
-        print("no RPP/WAV pairs found", file=sys.stderr)
+        print("no RPP/audio pairs found", file=sys.stderr)
         return 2
 
     splits = assign_splits([rpp.stem for rpp, _ in pairs], args.test_fraction)
     examples, failures = [], 0
 
-    for index, (rpp, wav) in enumerate(pairs, start=1):
+    for index, (rpp, audio) in enumerate(pairs, start=1):
         project = read_project(rpp)
         if not project.parts:
             print(f"SKIP    {rpp.name}: no canonically named parts found")
@@ -151,7 +168,7 @@ def _import(args: argparse.Namespace) -> int:
 
         example_id = f"ex_{index:04d}"
         split = splits[project.name]
-        example = import_example(project, wav, args.out, example_id, split, args.renderer,
+        example = import_example(project, audio, args.out, example_id, split, args.renderer,
                                  pitch_exceptions=exceptions.get(project.name))
         examples.append(example)
         print(f"{'OK  ' if not example.problems else 'PROB'}    {example_id} [{split}] "

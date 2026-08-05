@@ -1,14 +1,17 @@
-"""`import_example` pairs an already-rendered WAV with labels from its RPP.
+"""`import_example` pairs an already-rendered WAV or FLAC with labels from its
+RPP.
 
 No audio is synthesized here -- render.py's FluidSynth path is never called.
-These tests pin that: the imported WAV bytes are checked against the source
+These tests pin that: the imported audio bytes are checked against the source
 file, not against anything render.py could have produced.
 """
 
 import wave
 from pathlib import Path
 
+import numpy as np
 import pytest
+import soundfile as sf
 
 from reaper2mt3.dataset import import_example
 from reaper2mt3.rppread import Note, Project, ProjectPart
@@ -49,6 +52,17 @@ def write_wav(path: Path, seconds: float, channels=1, sampwidth=2, rate=44100):
         handle.setframerate(rate)
         frame_count = int(seconds * rate)
         handle.writeframes((b"\x10\x20" * channels) * frame_count)
+    return path
+
+
+def write_flac(path: Path, seconds: float, channels=1, subtype="PCM_16", rate=44100):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frame_count = int(seconds * rate)
+    # A single tone, not silence -- some tests need real signal to check
+    # against, others (silence tests) write zeros explicitly instead.
+    tone = 0.2 * np.sin(2 * np.pi * 440 * np.arange(frame_count) / rate)
+    samples = np.tile(tone[:, None], (1, channels)).astype(np.float32)
+    sf.write(str(path), samples, rate, format="FLAC", subtype=subtype)
     return path
 
 
@@ -237,3 +251,68 @@ def test_import_accepts_a_short_reasonable_tail(tmp_path):
 
     example = import_example(project, wav, tmp_path / "dataset", "ex_0001", "train", "r")
     assert not any("check 12" in p for p in example.problems)
+
+
+# --- FLAC: the same contract, a different container -----------------------
+#
+# `import_example`/`_check_audio` don't dispatch on extension at all --
+# `soundfile` detects WAV vs FLAC from the file's own content -- so these
+# mirror the WAV cases above rather than re-deriving new behaviour. The point
+# is confirming the single codepath actually is format-agnostic, not adding a
+# parallel one.
+
+
+def test_import_copies_flac_without_rendering_or_converting(tmp_path):
+    """Copied byte-for-byte, same as WAV -- and kept as .flac in the corpus,
+    not silently transcoded to .wav."""
+    rpp = write_rpp(tmp_path / "song.RPP")
+    flac = write_flac(tmp_path / "song.flac", seconds=1.0)
+    project = make_project([guitar_part()], path=rpp)
+
+    out = tmp_path / "dataset"
+    example = import_example(project, flac, out, "ex_0001", "train", "REAPER (manual)")
+
+    written = out / example.record["audio_path"]
+    assert written.suffix == ".flac"
+    assert written.read_bytes() == flac.read_bytes()
+
+
+def test_import_accepts_a_conforming_flac(tmp_path):
+    rpp = write_rpp(tmp_path / "song.RPP")
+    flac = write_flac(tmp_path / "song.flac", seconds=1.0, channels=1, rate=44100)
+    project = make_project([guitar_part()], path=rpp)
+
+    example = import_example(project, flac, tmp_path / "dataset", "ex_0001", "train", "r")
+    assert not any("check 6" in p for p in example.problems)
+
+
+@pytest.mark.parametrize("channels,rate", [(2, 44100), (1, 48000)])
+def test_import_flags_flac_that_does_not_meet_the_contract(tmp_path, channels, rate):
+    rpp = write_rpp(tmp_path / "song.RPP")
+    flac = write_flac(tmp_path / "song.flac", seconds=1.0, channels=channels, rate=rate)
+    project = make_project([guitar_part()], path=rpp)
+
+    example = import_example(project, flac, tmp_path / "dataset", "ex_0001", "train", "r")
+    assert any("check 6" in p for p in example.problems)
+
+
+def test_import_flags_silent_flac(tmp_path):
+    rpp = write_rpp(tmp_path / "song.RPP")
+    flac_path = tmp_path / "song.flac"
+    silence = np.zeros(44100, dtype=np.float32)
+    sf.write(str(flac_path), silence, 44100, format="FLAC", subtype="PCM_16")
+    project = make_project([guitar_part()], path=rpp)
+
+    example = import_example(project, flac_path, tmp_path / "dataset", "ex_0001", "train", "r")
+    assert any("check 6" in p and "silent" in p for p in example.problems)
+
+
+def test_import_flac_duration_used_for_tail_check(tmp_path):
+    """Not just format acceptance -- the duration soundfile reports from a
+    FLAC file must feed the same check 12 tail logic as WAV does."""
+    rpp = write_rpp(tmp_path / "song.RPP")
+    project = make_project([guitar_part(notes=[Note(0, 480, 52, 100, 0)])], path=rpp)  # ~0.25s
+    flac = write_flac(tmp_path / "song.flac", seconds=60.0)  # far past the performance
+
+    example = import_example(project, flac, tmp_path / "dataset", "ex_0001", "train", "r")
+    assert any("check 12" in p and "misalignment" in p for p in example.problems)

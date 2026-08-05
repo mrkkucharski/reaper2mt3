@@ -18,14 +18,15 @@ macOS, though nothing here is macOS-specific except the soundfont library path.
 
 ### 1. Verified, rendered REAPER projects
 
-Produced by `midi2reaper build`, then rendered to a `.wav` by hand in REAPER
-with the same base name as the `.RPP` (`Song.RPP` + `Song.wav`). REAPER itself
-is not required to run this tool — it parses the `.RPP` directly.
+Produced by `midi2reaper build`, then rendered to a `.wav` or `.flac` by hand
+in REAPER with the same base name as the `.RPP` (`Song.RPP` + `Song.wav`, or
+`Song.flac`). REAPER itself is not required to run this tool — it parses the
+`.RPP` directly.
 
 ### 2. Python  [3.11]
 
 Python 3.11+ and [uv](https://docs.astral.sh/uv/). Runtime dependencies are
-`mido` and `numpy`; `pytest` for the tests.
+`mido`, `numpy` and `soundfile`; `pytest` for the tests.
 
 ## Usage
 
@@ -37,16 +38,21 @@ uv pip install --python .venv/bin/python -e .
 .venv/bin/reaper2mt3 check ../data/pilot          # re-run contract checks
 ```
 
-`import` scans a directory for `<name>.RPP` + `<name>.wav` pairs, copies each
-WAV byte-for-byte, writes a corpus MIDI from the RPP's labels and notes, and
-runs the full `DATA_CONTRACT.md` acceptance list against what it wrote.
-**No audio is synthesized** — nothing here calls a renderer of any kind.
+`import` scans a directory for `<name>.RPP` + `<name>.wav`/`.flac` pairs
+(checked in that order — if a project somehow has both, `.wav` wins), copies
+the audio byte-for-byte in whatever format it finds, writes a corpus MIDI
+from the RPP's labels and notes, and runs the full `DATA_CONTRACT.md`
+acceptance list against what it wrote. Format detection is by file content
+(`soundfile`/`libsndfile`), not extension, so WAV and FLAC examples are
+validated through the exact same code path — nothing downstream needs to
+know or care which a given example used. **No audio is synthesized** —
+nothing here calls a renderer of any kind.
 
 ```text
 data/pilot/
   manifest.jsonl
   midi/train/ex_0002.mid      audio/train/ex_0002.wav
-  midi/test/ex_0001.mid       audio/test/ex_0001.wav
+  midi/test/ex_0001.mid       audio/test/ex_0001.flac
 ```
 
 A non-zero exit means at least one example failed a check; each failure names
@@ -140,5 +146,6 @@ requested; and it works only for SFLT-backed parts, never chain-driven ones.
   like its label. An instrument mismatched to its program passes every check.
 - No augmentation. Each source yields exactly one render, so a corpus built
   this way has no timbral variation.
-- `import` trusts the paired WAV's actual format; a render that isn't mono
-  16-bit 44.1 kHz is flagged by check 6, not corrected.
+- `import` trusts the paired audio's actual format; a render that isn't mono
+  16-bit 44.1 kHz is flagged by check 6, not corrected, regardless of whether
+  it's WAV or FLAC.

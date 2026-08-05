@@ -12,11 +12,11 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-import wave
 from dataclasses import dataclass
 from pathlib import Path
 
 import mido
+import soundfile as sf
 
 from . import gm
 from .render import DRUM_CHANNEL, RenderSettings, mix, render_part, write_wav
@@ -139,18 +139,19 @@ def build_example(
 
 def import_example(
     project: Project,
-    wav_path: Path,
+    audio_path: Path,
     out_root: Path,
     example_id: str,
     split: str,
     renderer: str,
     pitch_exceptions: dict[str, dict] | None = None,
 ) -> Example:
-    """Pair a manually rendered WAV with labels extracted from its project.
+    """Pair a manually rendered audio file (WAV or FLAC) with labels from its project.
 
     No audio is synthesized here -- `render.py` and its FluidSynth invocation
-    are not touched. The WAV is copied byte-for-byte; only the corpus MIDI is
-    generated, from the RPP's canonical track names and note data.
+    are not touched. The audio is copied byte-for-byte, in whatever format it
+    was rendered in; only the corpus MIDI is generated, from the RPP's
+    canonical track names and note data.
 
     `pitch_exceptions` is DATA_CONTRACT.md's escape hatch for material outside
     the accepted pitch range: `{"<track_name>": {"extra_pitches": [...],
@@ -159,22 +160,24 @@ def import_example(
     check` reads it back from the record rather than needing to be told again.
     """
     midi_path = Path("midi") / split / f"{example_id}.mid"
-    audio_path = Path("audio") / split / f"{example_id}.wav"
+    corpus_audio_path = Path("audio") / split / f"{example_id}{audio_path.suffix}"
 
     write_corpus_midi(project, out_root / midi_path)
-    dest = out_root / audio_path
+    dest = out_root / corpus_audio_path
     dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(wav_path, dest)
+    shutil.copy2(audio_path, dest)
 
     performance_seconds = project.seconds_at(project.last_tick)
-    with wave.open(str(dest)) as handle:
-        rate = handle.getframerate()
-        duration_seconds = handle.getnframes() / rate if rate else 0.0
+    # soundfile detects format from the file's own content, not its
+    # extension, so this reads WAV and FLAC identically -- confirmed against
+    # a real FLAC render, not assumed from the library's format table.
+    info = sf.info(dest)
+    duration_seconds = info.frames / info.samplerate if info.samplerate else 0.0
 
     record = {
         "id": example_id,
         "split": split,
-        "audio_path": str(audio_path),
+        "audio_path": str(corpus_audio_path),
         "midi_path": str(midi_path),
         # Contract targets, not measurements -- _check_audio compares the
         # actual file against these and reports the mismatch if there is one.
@@ -183,8 +186,8 @@ def import_example(
         "source_midi_id": project.name,
         "source_project": str(project.path),
         "source_project_sha256": _sha256(project.path),
-        "source_audio": str(wav_path),
-        "source_audio_sha256": _sha256(wav_path),
+        "source_audio": str(audio_path),
+        "source_audio_sha256": _sha256(audio_path),
         "parts": [_part_record(part) for part in project.parts],
         "skipped_tracks": [{"name": name, "reason": "track name did not parse canonically"}
                            for name in project.unparsed_tracks],
@@ -263,7 +266,7 @@ def validate_example(record: dict, out_root: Path) -> list[str]:
         problems += _check_midi(midi_path, parts, record.get("approved_exceptions", {}))
 
     if not audio_path.exists():
-        problems.append("check 6: WAV missing")
+        problems.append("check 6: audio missing")
     else:
         problems += _check_audio(audio_path, record["sample_rate_hz"])
 
@@ -324,17 +327,19 @@ def _check_midi(path: Path, parts: list[dict], pitch_exceptions: dict[str, dict]
 
 
 def _check_audio(path: Path, sample_rate: int) -> list[str]:
+    """Format-agnostic: `soundfile` detects WAV vs FLAC from the file's own
+    content, so this validates both the same way, one codepath."""
     problems: list[str] = []
-    with wave.open(str(path)) as handle:
-        if handle.getnchannels() != 1:
-            problems.append(f"check 6: WAV has {handle.getnchannels()} channels, expected mono")
-        if handle.getframerate() != sample_rate:
-            problems.append(f"check 6: WAV is {handle.getframerate()} Hz, expected {sample_rate}")
-        if handle.getsampwidth() != 2:
-            problems.append("check 6: WAV is not 16-bit PCM")
-        frames = handle.readframes(handle.getnframes())
-    if not frames or max(frames) == 0:
-        problems.append("check 6: WAV is silent")
+    info = sf.info(path)
+    if info.channels != 1:
+        problems.append(f"check 6: audio has {info.channels} channels, expected mono")
+    if info.samplerate != sample_rate:
+        problems.append(f"check 6: audio is {info.samplerate} Hz, expected {sample_rate}")
+    if info.subtype != "PCM_16":
+        problems.append(f"check 6: audio is not 16-bit PCM ({info.subtype})")
+    samples, _ = sf.read(path, dtype="int16")
+    if not len(samples) or not samples.any():
+        problems.append("check 6: audio is silent")
     return problems
 
 
