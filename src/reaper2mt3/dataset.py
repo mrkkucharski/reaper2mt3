@@ -343,7 +343,12 @@ def _check_audio(path: Path, sample_rate: int) -> list[str]:
     return problems
 
 
-def assign_splits(source_ids: list[str], test_fraction: float) -> dict[str, str]:
+SPLITS_FILENAME = "splits.json"
+
+
+def assign_splits(
+    source_ids: list[str], test_fraction: float, existing: dict[str, str] | None = None,
+) -> dict[str, str]:
     """Stable per-source split that also guarantees the test count.
 
     Thresholding a per-item hash is stable but not proportional — on nine
@@ -351,14 +356,52 @@ def assign_splits(source_ids: list[str], test_fraction: float) -> dict[str, str]
     assignment deterministic and independent of input order while making the
     size exact, and splitting per source (never per render) is what stops
     alternate renders of one performance leaking across splits.
+
+    `existing` (persisted via `load_splits`/`write_splits`) freezes every id it
+    already covers: growing the corpus must never silently reassign a source
+    that was already split, since ranking the *whole* set by hash makes the
+    train/test boundary shift purely because the total count changed, not
+    because of any decision about that specific source (see PROJECT_LOG.md,
+    "Corpus rebuilt from reviewed -REV projects" — this bit a real corpus
+    rebuild before it was caught). Only ids not yet in `existing` are freshly
+    ranked and split among themselves, targeting `test_fraction` of just the
+    new arrivals.
     """
-    ordered = sorted(set(source_ids), key=lambda s: hashlib.sha256(s.encode()).hexdigest())
-    if test_fraction <= 0 or not ordered:
-        return {name: "train" for name in ordered}
-    count = max(1, round(len(ordered) * test_fraction)) if test_fraction > 0 else 0
-    count = min(count, max(0, len(ordered) - 1))  # never leave the train split empty
-    test = set(ordered[:count])
-    return {name: ("test" if name in test else "train") for name in ordered}
+    existing = existing or {}
+    ordered = sorted(set(source_ids))
+    frozen = {name: existing[name] for name in ordered if name in existing}
+    new_ids = sorted(
+        (name for name in ordered if name not in existing),
+        key=lambda s: hashlib.sha256(s.encode()).hexdigest(),
+    )
+    if test_fraction <= 0 or not new_ids:
+        fresh = {name: "train" for name in new_ids}
+    else:
+        count = max(1, round(len(new_ids) * test_fraction))
+        count = min(count, max(0, len(new_ids) - 1))  # never leave the train split empty
+        test = set(new_ids[:count])
+        fresh = {name: ("test" if name in test else "train") for name in new_ids}
+    return {**frozen, **fresh}
+
+
+def load_splits(out_root: Path) -> dict[str, str]:
+    """The persisted `source_midi_id` -> split assignment, or `{}` if none
+    exists yet (a brand-new dataset root, or one from before this file
+    existed)."""
+    path = out_root / SPLITS_FILENAME
+    if not path.is_file():
+        return {}
+    return json.loads(path.read_text())
+
+
+def write_splits(splits: dict[str, str], out_root: Path) -> None:
+    """Persists the full current split assignment. Callers must pass
+    `assign_splits`'s own return value (this run's ids merged with whatever
+    `load_splits` returned) so a source already on disk is never dropped or
+    reassigned by a later, smaller call."""
+    path = out_root / SPLITS_FILENAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(splits, indent=2, sort_keys=True) + "\n")
 
 
 def write_manifest(examples: list[Example], path: Path) -> None:

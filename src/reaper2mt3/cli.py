@@ -9,7 +9,15 @@ import sys
 import tempfile
 from pathlib import Path
 
-from .dataset import assign_splits, build_example, import_example, validate_example, write_manifest
+from .dataset import (
+    assign_splits,
+    build_example,
+    import_example,
+    load_splits,
+    validate_example,
+    write_manifest,
+    write_splits,
+)
 from .render import RenderError, RenderSettings, fluidsynth_version
 from .rppread import read_project
 
@@ -79,7 +87,7 @@ def _build(args: argparse.Namespace) -> int:
         print("no REAPER projects found", file=sys.stderr)
         return 2
 
-    splits = assign_splits([p.stem for p in paths], args.test_fraction)
+    splits = assign_splits([p.stem for p in paths], args.test_fraction, load_splits(args.out))
     work_dir = Path(tempfile.mkdtemp(prefix="reaper2mt3-"))
     examples, failures = [], 0
 
@@ -109,6 +117,7 @@ def _build(args: argparse.Namespace) -> int:
 
         if examples:
             write_manifest(examples, args.out / "manifest.jsonl")
+            write_splits(splits, args.out)
         if args.keep_stems:
             shutil.copytree(work_dir, args.out / "stems", dirs_exist_ok=True)
     finally:
@@ -156,7 +165,7 @@ def _import(args: argparse.Namespace) -> int:
         print("no RPP/audio pairs found", file=sys.stderr)
         return 2
 
-    splits = assign_splits([rpp.stem for rpp, _ in pairs], args.test_fraction)
+    splits = assign_splits([rpp.stem for rpp, _ in pairs], args.test_fraction, load_splits(args.out))
     examples, failures = [], 0
 
     for index, (rpp, audio) in enumerate(pairs, start=1):
@@ -181,6 +190,7 @@ def _import(args: argparse.Namespace) -> int:
 
     if examples:
         write_manifest(examples, args.out / "manifest.jsonl")
+        write_splits(splits, args.out)
 
     clean = sum(1 for e in examples if not e.problems)
     print(f"\n{len(examples)} example(s) imported to {args.out} "

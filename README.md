@@ -120,6 +120,18 @@ Assigned per *source*, never per render, and by ranking a hash rather than
 thresholding it — thresholding is stable but not proportional, and produced an
 empty test split on nine sources at 0.2.
 
+Persisted to `splits.json` in the dataset root (`source_midi_id` ->
+`"train"`/`"test"`) and immutable once written: every subsequent `import` or
+`build` call loads it first and freezes every source it already covers, no
+matter how many new sources are added. Only ids not yet in `splits.json` are
+freshly ranked and split among themselves. This matters because ranking the
+*whole* set by hash on every call makes the train/test boundary shift purely
+because the total count changed — not because of any decision about a
+specific source — which is exactly what corrupted a real corpus rebuild
+before this file existed (`PROJECT_LOG.md`, 2026-08-05). `splits.json` is not
+touched by the `rm -rf manifest.jsonl midi audio` rebuild step above by
+design: deleting it would defeat the whole point.
+
 ## `build`: the FluidSynth path
 
 A second command, `reaper2mt3 build`, renders audio itself via FluidSynth
