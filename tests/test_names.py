@@ -79,6 +79,15 @@ def test_human_suffix_is_ignored():
     assert gm.parse_track_name(name) == (27, False, True)
 
 
+@pytest.mark.parametrize("name", [
+    "distortion-guitar:rhythm trailing text",
+    "distortion-guitar:rhythm | human display name",
+])
+def test_strict_corpus_name_rejects_nonterminal_rhythm_suffix(name):
+    assert gm.parse_track_name(name) == (30, False, True)
+    assert gm.parse_track_name(name, strict_corpus_name=True) is None
+
+
 def test_vocal_marker_suffix_is_ignored():
     assert gm.parse_track_name("tenor-sax | Vocals [vocal→instrument]") == (66, False, None)
 
