@@ -81,7 +81,9 @@ def track_name(program: int | None, is_drum: bool, rhythm: bool | None) -> str:
 _SLUG_TO_PROGRAM = {program_slug(p): p for p in range(128)}
 
 
-def parse_track_name(name: str) -> tuple[int | None, bool, bool | None] | None:
+def parse_track_name(
+    name: str, *, strict_corpus_name: bool = False,
+) -> tuple[int | None, bool, bool | None] | None:
     """Inverse of `track_name`: returns (program, is_drum, rhythm).
 
     `rhythm` is True or None; there is no False, because absence of the
@@ -90,6 +92,15 @@ def parse_track_name(name: str) -> tuple[int | None, bool, bool | None] | None:
     `[vocal→instrument]` marker — is ignored and a project renamed in REAPER
     still parses.
     """
+    if strict_corpus_name:
+        # Corpus MIDI is machine input, not a REAPER display label.  In
+        # particular, accepting a suffix after ``:rhythm`` would make a
+        # malformed label indistinguishable from its canonical counterpart.
+        parsed = parse_track_name(name)
+        if parsed is None or name != track_name(*parsed):
+            return None
+        return parsed
+
     head = name.split("|", 1)[0].strip()
     slug_part, separator, annotation = head.partition(":")
     slug_part = slug_part.strip()
