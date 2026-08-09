@@ -178,7 +178,7 @@ def _import(args: argparse.Namespace) -> int:
     examples, failures = [], 0
 
     for index, (rpp, audio) in enumerate(pairs, start=1):
-        project = read_project(rpp, strict_corpus_names=True)
+        project = read_project(rpp, strict_corpus_names=False)
         try:
             preflight_report = preflight(project, sidecar)
         except ValueError as error:

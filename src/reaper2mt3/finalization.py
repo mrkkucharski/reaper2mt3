@@ -69,6 +69,22 @@ def preflight(project: Project, sidecar: FinalizationInput) -> dict:
     if project.invalid_corpus_names:
         raise ValueError("non-terminal canonical corpus names: " + ", ".join(project.invalid_corpus_names))
 
+    for part in project.parts:
+        if part.track_name == part.canonical_name:
+            continue
+        expected_aliases = [
+            alias.get("renderer_track_id")
+            for alias in sidecar.aliases
+            if isinstance(alias, dict)
+            and alias.get("authoritative_symbolic_part") == part.canonical_name
+        ]
+        if not any(
+            isinstance(alias, str)
+            and part.track_name == f"{part.canonical_name} | {alias}"
+            for alias in expected_aliases
+        ):
+            raise ValueError(f"unattested non-canonical renderer label: {part.track_name}")
+
     planned: list[tuple[ProjectPart, list[Note], dict]] = []
     for part in project.parts:
         policy = sidecar.policy_for(part.canonical_name)
