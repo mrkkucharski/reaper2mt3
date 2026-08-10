@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 from dataclasses import dataclass
 from pathlib import Path
+
+import mido
 
 from .rppread import Note, Project, ProjectPart
 
@@ -16,6 +20,13 @@ REQUIRED_REPOSITORIES = ("procgen", "mt3", "midi2reaper", "reaper2mt3")
 @dataclass(frozen=True)
 class FinalizationInput:
     record: dict
+    # The renderer MIDI embedded in the RPP has its note starts shifted
+    # earlier (attack-latency compensation) and the whole timeline offset by a
+    # fixed lead-in (#64); neither belongs in shipped ground truth.  These are
+    # procgen's uncompensated corpus export, read once at load time so
+    # `preflight` can substitute them for the RPP's own note ticks (#65).
+    label_ppq: int
+    label_notes: dict[str, list[Note]]
 
     @property
     def aliases(self) -> list[dict]:
@@ -56,7 +67,57 @@ def load_finalization_input(path: Path) -> FinalizationInput:
         not isinstance(p, dict) or not p.get("id") or not p.get("version") for p in profiles
     ):
         raise ValueError("render provenance lacks VST profile versions")
-    return FinalizationInput(record)
+    label_ppq, label_notes = _load_label_midi(record.get("label_midi"), path)
+    return FinalizationInput(record, label_ppq, label_notes)
+
+
+def _load_label_midi(entry: object, sidecar: Path) -> tuple[int, dict[str, list[Note]]]:
+    if (
+        not isinstance(entry, dict)
+        or not isinstance(entry.get("path"), str)
+        or not entry["path"]
+        or not isinstance(entry.get("sha256"), str)
+        or len(entry["sha256"]) != 64
+    ):
+        raise ValueError(f"render provenance lacks a label_midi path and SHA-256: {sidecar}")
+    label_path = Path(entry["path"])
+    try:
+        content = label_path.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"cannot read label_midi {label_path}: {exc}") from exc
+    if hashlib.sha256(content).hexdigest() != entry["sha256"].lower():
+        raise ValueError(f"label_midi SHA-256 does not match render provenance: {label_path}")
+    try:
+        midi = mido.MidiFile(file=io.BytesIO(content))
+    except (OSError, EOFError, ValueError) as exc:
+        raise ValueError(f"invalid label MIDI {label_path}: {exc}") from exc
+
+    notes: dict[str, list[Note]] = {}
+    for track in midi.tracks:
+        name = next((message.name for message in track if message.type == "track_name"), None)
+        if name is None or name == "conductor":
+            continue
+        tick = 0
+        open_notes: dict[tuple[int, int], list[tuple[int, int]]] = {}
+        collected: list[Note] = []
+        for message in track:
+            tick += message.time
+            if message.type == "note_on" and message.velocity > 0:
+                open_notes.setdefault((message.channel, message.note), []).append((tick, message.velocity))
+                continue
+            is_note_off = message.type == "note_off" or (
+                message.type == "note_on" and message.velocity == 0
+            )
+            if not is_note_off:
+                continue
+            pending = open_notes.get((message.channel, message.note))
+            if not pending:
+                continue
+            start, velocity = pending.pop(0)
+            collected.append(Note(start=start, end=tick, pitch=message.note,
+                                  velocity=velocity, channel=message.channel))
+        notes[name] = sorted(collected, key=lambda note: (note.start, note.pitch))
+    return midi.ticks_per_beat, notes
 
 
 def preflight(project: Project, sidecar: FinalizationInput) -> dict:
@@ -128,9 +189,27 @@ def preflight(project: Project, sidecar: FinalizationInput) -> dict:
         selected.append(group[0])
         collapsed.append({"canonical_name": canonical_name, "renderer_tracks": aliases})
 
+    if project.ppq != sidecar.label_ppq:
+        raise ValueError(
+            f"label MIDI ppq {sidecar.label_ppq} does not match project ppq {project.ppq}"
+        )
+
     project.parts = [part for part, notes, _ in selected]
     for part, notes, _ in selected:
-        part.notes = notes
+        # The RPP's own notes are only used up to here, to decide keyswitch
+        # removal and which renderer-track duplicates collapse into which
+        # symbolic part.  The ticks actually shipped as ground truth come
+        # from label_midi, never from the (compensated, lead-in-shifted)
+        # renderer notes -- see FinalizationInput.label_notes and #65.
+        label = sidecar.label_notes.get(part.canonical_name)
+        if label is None:
+            raise ValueError(f"label MIDI has no track for {part.canonical_name}")
+        if [n.pitch for n in label] != [n.pitch for n in notes]:
+            raise ValueError(
+                f"label MIDI notes for {part.canonical_name} do not match the "
+                "renderer's post-policy note sequence (count or pitch order differs)"
+            )
+        part.notes = label
     return {
         "source_event_audit": [audit for _, _, audit in planned],
         "collapsed_renderer_duplicates": collapsed,
