@@ -65,6 +65,7 @@ class ProjectPart:
     notes: list[Note] = field(default_factory=list)
     muted: bool = False
     soloed: bool = False
+    source_cc_count: int = 0
 
     @property
     def canonical_name(self) -> str:
@@ -83,6 +84,7 @@ class Project:
     time_signature: tuple[int, int]
     parts: list[ProjectPart] = field(default_factory=list)
     unparsed_tracks: list[str] = field(default_factory=list)
+    invalid_corpus_names: list[str] = field(default_factory=list)
 
     @property
     def name(self) -> str:
@@ -127,13 +129,14 @@ class Project:
         return seconds + (tick - previous_tick) / self.ppq * previous_tempo / 1e6
 
 
-def read_project(path: Path) -> Project:
+def read_project(path: Path, *, strict_corpus_names: bool = False) -> Project:
     lines = path.read_text(encoding="utf-8", errors="replace").split("\n")
     ppq = 960
     tempo_points: list[tuple[float, float]] = []
     time_signature = (4, 4)
     parts: list[ProjectPart] = []
     unparsed: list[str] = []
+    invalid_corpus_names: list[str] = []
 
     track_name: str | None = None
     pending: dict | None = None
@@ -152,7 +155,8 @@ def read_project(path: Path) -> Project:
             bits = stripped.split()
             tempo_points.append((float(bits[0 + 1]), float(bits[2])))
         elif stripped.startswith("<TRACK "):
-            _flush(parts, unparsed, pending, track_name)
+            _flush(parts, unparsed, invalid_corpus_names, pending, track_name,
+                   strict_corpus_names)
             # Initialized as soon as a track starts, not on first SFLT sighting,
             # so a track driven by any other plugin still gets its notes read.
             track_name, pending = None, {}
@@ -179,12 +183,14 @@ def read_project(path: Path) -> Project:
             if len(bits) >= 3 and bits[2].isdigit():
                 ppq = int(bits[2])
         elif stripped.startswith(("E ", "e ")) and pending is not None:
-            notes, i = _read_events(lines, i)
+            audit: dict[str, int] = {}
+            notes, i = _read_events(lines, i, audit=audit)
             pending.setdefault("notes", []).extend(notes)
+            pending["source_cc_count"] = pending.get("source_cc_count", 0) + audit.get("cc", 0)
 
         i += 1
 
-    _flush(parts, unparsed, pending, track_name)
+    _flush(parts, unparsed, invalid_corpus_names, pending, track_name, strict_corpus_names)
 
     # A single tempo is written as TEMPO alone; keep the envelope authoritative.
     if len(tempo_points) > 1:
@@ -197,18 +203,21 @@ def read_project(path: Path) -> Project:
         time_signature=time_signature,
         parts=parts,
         unparsed_tracks=unparsed,
+        invalid_corpus_names=invalid_corpus_names,
     )
 
 
-def _flush(parts, unparsed, pending, track_name) -> None:
+def _flush(parts, unparsed, invalid_corpus_names, pending, track_name, strict_corpus_names) -> None:
     if pending is None:
         # No <TRACK block was ever opened for this name -- happens only before
         # the first track in the file, where track_name is also always None.
         if track_name:
             unparsed.append(track_name)
         return
-    parsed = gm.parse_track_name(track_name or "")
+    parsed = gm.parse_track_name(track_name or "", strict_corpus_name=strict_corpus_names)
     if parsed is None:
+        if strict_corpus_names and gm.parse_track_name(track_name or "") is not None:
+            invalid_corpus_names.append(track_name or "(unnamed)")
         unparsed.append(track_name or "(unnamed)")
         return
     program, is_drum, rhythm = parsed
@@ -225,6 +234,7 @@ def _flush(parts, unparsed, pending, track_name) -> None:
             notes=sorted(pending.get("notes", []), key=lambda n: n.start),
             muted=pending.get("muted", False),
             soloed=pending.get("soloed", False),
+            source_cc_count=pending.get("source_cc_count", 0),
         )
     )
 
@@ -255,9 +265,12 @@ def _decode_state(payload: list[str]) -> dict:
     return json.loads(blocks[1][8 : 8 + length].decode())
 
 
-def _read_events(lines: list[str], start: int) -> tuple[list[Note], int]:
+def _read_events(
+    lines: list[str], start: int, audit: dict[str, int] | None = None,
+) -> tuple[list[Note], int]:
     """Consume a run of `E <delta> <status> <data1> <data2>` lines into notes."""
     notes: list[Note] = []
+    source_cc_count = 0
     # Merged parts stack identical pitches, so each (channel, pitch) holds a
     # queue and note-offs are matched first-in-first-out. A plain dict would
     # discard every note but the last of an overlapping run.
@@ -281,6 +294,10 @@ def _read_events(lines: list[str], start: int) -> tuple[list[Note], int]:
             if queue:
                 begin, velocity = queue.pop(0)
                 notes.append(Note(begin, max(tick, begin + 1), pitch, velocity, channel))
+        elif kind == 0xB0:
+            source_cc_count += 1
         i += 1
 
+    if audit is not None:
+        audit["cc"] = source_cc_count
     return notes, i - 1

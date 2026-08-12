@@ -18,6 +18,7 @@ from .dataset import (
     write_manifest,
     write_splits,
 )
+from .finalization import load_finalization_input, preflight, provenance_record
 from .render import RenderError, RenderSettings, fluidsynth_version
 from .rppread import read_project
 
@@ -53,6 +54,9 @@ def main(argv: list[str] | None = None) -> int:
     imp.add_argument("--exceptions", type=Path,
                      help="JSON file of approved out-of-range pitches, keyed by "
                           "source_midi_id -- see DATA_CONTRACT.md's pitch range exception")
+    imp.add_argument("--render-provenance", type=Path, required=True,
+                     help="procgen.reaper-render-provenance/v1 sidecar; supplies pinned "
+                          "revisions, renderer aliases, and per-part event policy")
 
     lint = sub.add_parser(
         "lint",
@@ -164,6 +168,11 @@ def _import(args: argparse.Namespace) -> int:
             print(f"no exceptions file at {args.exceptions}", file=sys.stderr)
             return 2
         exceptions = json.loads(args.exceptions.read_text())
+    try:
+        sidecar = load_finalization_input(args.render_provenance)
+    except ValueError as error:
+        print(error, file=sys.stderr)
+        return 2
 
     rpp_files = sorted(args.source.rglob("*.RPP")) if args.source.is_dir() else [args.source]
     pairs: list[tuple[Path, Path]] = []
@@ -182,7 +191,13 @@ def _import(args: argparse.Namespace) -> int:
     examples, failures = [], 0
 
     for index, (rpp, audio) in enumerate(pairs, start=1):
-        project = read_project(rpp)
+        project = read_project(rpp, strict_corpus_names=False)
+        try:
+            preflight_report = preflight(project, sidecar)
+        except ValueError as error:
+            print(f"FAIL    {rpp.name}: {error}")
+            failures += 1
+            continue
         if not project.parts:
             print(f"SKIP    {rpp.name}: no canonically named parts found")
             failures += 1
@@ -192,6 +207,15 @@ def _import(args: argparse.Namespace) -> int:
         split = splits[project.name]
         example = import_example(project, audio, args.out, example_id, split, args.renderer,
                                  pitch_exceptions=exceptions.get(project.name))
+        provenance_path = Path("provenance") / split / f"{example_id}.json"
+        full_provenance_path = args.out / provenance_path
+        full_provenance_path.parent.mkdir(parents=True, exist_ok=True)
+        full_provenance_path.write_text(
+            json.dumps(provenance_record(sidecar, preflight_report, example_id),
+                       indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        example.record["provenance_path"] = str(provenance_path)
         examples.append(example)
         print(f"{'OK  ' if not example.problems else 'PROB'}    {example_id} [{split}] "
               f"{rpp.stem[:40]:<40} {len(project.parts)} parts")
