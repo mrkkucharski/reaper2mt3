@@ -121,6 +121,26 @@ def test_generated_command_shape(tmp_path):
     assert "noprompt:" in script  # swaps to a blank project rather than prompting to save
 
 
+def test_non_ascii_project_name_is_valid_lua_not_json_unicode_escape(tmp_path):
+    """A real corpus file ("...Pamiętasz...") hit exactly this: json.dumps's
+    default \\uXXXX escape is valid JSON but not valid Lua, so REAPER's
+    interpreter rejected the generated script outright with a syntax error
+    and never rendered anything."""
+    rpp = _rpp(tmp_path, name="Budka Suflera-Jolka Jolka Pamiętasz.RPP")
+    seen = {}
+
+    def runner(command, timeout):
+        seen["script"] = open(command[4], encoding="utf-8").read()
+        _write_tone(tmp_path / "Budka Suflera-Jolka Jolka Pamiętasz.flac")
+
+    settings = RenderReaperSettings(reaper_binary=_fake_reaper_binary(tmp_path))
+    render_project(rpp, settings=settings, runner=runner)
+
+    script = seen["script"]
+    assert "Pamiętasz" in script
+    assert "\\u" not in script
+
+
 def test_timeout_raises_render_error_with_actionable_message(tmp_path):
     rpp = _rpp(tmp_path)
 

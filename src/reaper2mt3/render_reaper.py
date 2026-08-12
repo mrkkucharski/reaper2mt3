@@ -165,7 +165,13 @@ def _lua_render_script(
     out_dir: Path, pattern: str, settings: RenderReaperSettings, discard_project: Path,
 ) -> str:
     # JSON string literals are valid Lua string literals and protect paths
-    # with spaces/quotes without asking a shell to interpret them.
+    # with spaces/quotes without asking a shell to interpret them -- but only
+    # with ensure_ascii=False. json.dumps's default escapes any non-ASCII
+    # character (a song title with a diacritic, e.g. "Pamiętasz") as \uXXXX,
+    # which is valid JSON but not valid Lua: Lua has no bare \u escape at all
+    # (5.3+'s is spelled \u{XXXX}, with braces), so REAPER's Lua interpreter
+    # fails the whole script with "missing '{'" and never renders -- caught
+    # via a real corpus file that hit exactly this.
     format_code = _FORMAT_CODES[settings.audio_format]
     return "\n".join([
         "local project = 0",
@@ -176,15 +182,27 @@ def _lua_render_script(
         "reaper.GetSetProjectInfo_String(project, 'RENDER_FORMAT', "
         f"'{format_code}', true)",
         "reaper.GetSetProjectInfo_String(project, 'RENDER_FILE', "
-        + json.dumps(str(out_dir)) + ", true)",
+        + _lua_string(str(out_dir)) + ", true)",
         "reaper.GetSetProjectInfo_String(project, 'RENDER_PATTERN', "
-        + json.dumps(pattern) + ", true)",
+        + _lua_string(pattern) + ", true)",
         "reaper.Main_OnCommand(42230, 0)",  # render project, using the most recent render settings
         "reaper.Main_openProject("
-        + json.dumps("noprompt:" + str(discard_project)) + ")",
+        + _lua_string("noprompt:" + str(discard_project)) + ")",
         "reaper.Main_OnCommand(40004, 0)",  # close current project
         "",
     ])
+
+
+def _lua_string(value: str) -> str:
+    """A double-quoted Lua string literal for `value`.
+
+    JSON and Lua string-literal syntax agree on every escape this needs
+    (`\"`, `\\`, control characters) except JSON's `\\uXXXX`, so
+    `ensure_ascii=False` keeps non-ASCII characters as literal UTF-8 bytes
+    instead -- which Lua accepts directly, and which the .lua script file is
+    written out as (`encoding="utf-8"`, below).
+    """
+    return json.dumps(value, ensure_ascii=False)
 
 
 def _subprocess_runner(command: Sequence[str], timeout: int) -> None:
