@@ -54,11 +54,24 @@ def main(argv: list[str] | None = None) -> int:
                      help="JSON file of approved out-of-range pitches, keyed by "
                           "source_midi_id -- see DATA_CONTRACT.md's pitch range exception")
 
+    lint = sub.add_parser(
+        "lint",
+        help="check REAPER projects for non-canonical track names, "
+             "out-of-vocabulary instruments, and muted/soloed tracks -- "
+             "before rendering or import, not instead of it",
+    )
+    lint.add_argument("projects", nargs="+", type=Path, help="RPP files or directories")
+    lint.add_argument("--vocabulary", type=Path,
+                      help="JSON file listing allowed canonical base slugs (without any "
+                           "':rhythm' suffix); omit to skip the out-of-vocabulary check")
+
     args = parser.parse_args(argv)
     if args.command == "check":
         return _check(args)
     if args.command == "import":
         return _import(args)
+    if args.command == "lint":
+        return _lint(args)
     return _build(args)
 
 
@@ -218,6 +231,47 @@ def _check(args: argparse.Namespace) -> int:
 
     print(f"{total} example(s) checked, {problems} problem(s)")
     return 1 if problems else 0
+
+
+def _lint(args: argparse.Namespace) -> int:
+    vocabulary: set[str] | None = None
+    if args.vocabulary:
+        if not args.vocabulary.exists():
+            print(f"no vocabulary file at {args.vocabulary}", file=sys.stderr)
+            return 2
+        vocabulary = set(json.loads(args.vocabulary.read_text()))
+
+    paths = _collect(args.projects)
+    if not paths:
+        print("no REAPER projects found", file=sys.stderr)
+        return 2
+
+    total_problems = 0
+    for path in paths:
+        project = read_project(path)
+        problems: list[str] = []
+
+        for name in project.unparsed_tracks:
+            problems.append(f"non-canonical track name: {name[:70]}")
+
+        for part in project.parts:
+            base_slug = part.canonical_name.split(":", 1)[0]
+            if vocabulary is not None and base_slug not in vocabulary:
+                problems.append(f"out-of-vocabulary instrument: {part.canonical_name} "
+                               f"({part.track_name[:60]})")
+            if part.muted:
+                problems.append(f"muted track: {part.canonical_name} ({part.track_name[:60]})")
+            if part.soloed:
+                problems.append(f"soloed track: {part.canonical_name} ({part.track_name[:60]})")
+
+        print(f"{'OK  ' if not problems else 'PROB'}    {path.name[:70]:<70} "
+              f"{len(project.parts)} part(s)")
+        for problem in problems:
+            print(f"          {problem}")
+        total_problems += len(problems)
+
+    print(f"\n{len(paths)} project(s) checked, {total_problems} problem(s)")
+    return 1 if total_problems else 0
 
 
 if __name__ == "__main__":

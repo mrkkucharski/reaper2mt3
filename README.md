@@ -36,6 +36,7 @@ uv pip install --python .venv/bin/python -e .
 
 .venv/bin/reaper2mt3 import ../reaper/generated -o ../data/pilot
 .venv/bin/reaper2mt3 check ../data/pilot          # re-run contract checks
+.venv/bin/reaper2mt3 lint ../reaper/generated --vocabulary vocabulary.json
 ```
 
 `import` scans a directory for `<name>.RPP` + `<name>.wav`/`.flac` pairs
@@ -58,6 +59,27 @@ data/pilot/
 A non-zero exit means at least one example failed a check; each failure names
 the `DATA_CONTRACT.md` check number that caught it. `--test-fraction` (default
 0.2) controls the split.
+
+### `lint`: check hand-curated projects before they're imported
+
+`import` already skips non-canonical tracks silently (with a one-line notice)
+so a session in progress isn't blocked. `lint` is the pre-flight opposite: run
+it over `reaper/generated` (or any set of RPP files/directories) any time
+after a review pass, to get every problem in one report instead of
+discovering them one `import` run at a time:
+
+- **non-canonical track names** — anything `read_project` can't parse into a
+  GM identity at all (typos, stray attribution text used as the whole name)
+- **out-of-vocabulary instruments**, if `--vocabulary <file.json>` is given —
+  a JSON list of allowed canonical base slugs (without any `:rhythm` suffix;
+  the rhythm variant of an allowed slug is always allowed too). Omit the flag
+  to skip this check and only catch non-canonical names and mute/solo state
+- **muted or soloed tracks** — read directly from each track's `MUTESOLO`
+  line; catches an instrument left silent, or a solo left engaged, from
+  auditioning in REAPER and forgotten before the project was considered done
+
+Exits non-zero if anything was found. This never renders or writes a
+dataset — it is purely a read-only report over the RPP files themselves.
 
 ### Pitch-range exceptions
 
