@@ -60,10 +60,11 @@ CHAIN_CHUNK = """      <VST "VST3i: Kontakt 8 (Native Instruments) (64 out)" "Ko
       FXID {A0000000-0000-0000-0000-000000000003}"""
 
 
-def _track(name: str, fx_chunk: str, notes: str) -> str:
-    return "\n".join([
-        "  <TRACK {G}",
-        f'    NAME "{name}"',
+def _track(name: str, fx_chunk: str, notes: str, mutesolo: str | None = None) -> str:
+    lines = ["  <TRACK {G}", f'    NAME "{name}"']
+    if mutesolo is not None:
+        lines.append(f"    MUTESOLO {mutesolo}")
+    lines += [
         "    <FXCHAIN",
         fx_chunk,
         "    >",
@@ -74,7 +75,8 @@ def _track(name: str, fx_chunk: str, notes: str) -> str:
         "      >",
         "    >",
         "  >",
-    ])
+    ]
+    return "\n".join(lines)
 
 
 def _project(*tracks: str) -> str:
@@ -151,3 +153,32 @@ def test_unrecognized_track_name_still_reported_unparsed(tmp_path):
 
     assert project.parts == []
     assert project.unparsed_tracks == ["Random Track Name"]
+
+
+def test_default_track_is_neither_muted_nor_soloed(tmp_path):
+    notes = "        E 0 90 3c 64\n        E 480 80 3c 00"
+    text = _project(_track("drums", CHAIN_CHUNK, notes))
+    project = read_project(_write(tmp_path, text))
+
+    assert project.parts[0].muted is False
+    assert project.parts[0].soloed is False
+
+
+def test_muted_track_is_reported(tmp_path):
+    notes = "        E 0 90 3c 64\n        E 480 80 3c 00"
+    text = _project(_track("drums", CHAIN_CHUNK, notes, mutesolo="1 0 0"))
+    project = read_project(_write(tmp_path, text))
+
+    assert project.parts[0].muted is True
+    assert project.parts[0].soloed is False
+
+
+def test_soloed_track_is_reported(tmp_path):
+    """REAPER's solo field is not just a bool (e.g. 2 for solo-in-front), so
+    any non-zero value must count as soloed."""
+    notes = "        E 0 90 3c 64\n        E 480 80 3c 00"
+    text = _project(_track("drums", CHAIN_CHUNK, notes, mutesolo="0 2 0"))
+    project = read_project(_write(tmp_path, text))
+
+    assert project.parts[0].muted is False
+    assert project.parts[0].soloed is True

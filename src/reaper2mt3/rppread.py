@@ -63,6 +63,8 @@ class ProjectPart:
     patch: int | None
     instrument_plugins: list[str] = field(default_factory=list)
     notes: list[Note] = field(default_factory=list)
+    muted: bool = False
+    soloed: bool = False
 
     @property
     def canonical_name(self) -> str:
@@ -156,6 +158,11 @@ def read_project(path: Path) -> Project:
             track_name, pending = None, {}
         elif stripped.startswith("NAME ") and track_name is None:
             track_name = _unquote(stripped[5:].strip())
+        elif stripped.startswith("MUTESOLO ") and pending is not None:
+            bits = stripped.split()
+            if len(bits) >= 3:
+                pending["muted"] = bits[1] != "0"
+                pending["soloed"] = bits[2] != "0"
         elif stripped.startswith(SFLT_MARKER) and pending is not None:
             payload, i = _collect_chunk(lines, i)
             state = _decode_state(payload)["fields"]
@@ -216,6 +223,8 @@ def _flush(parts, unparsed, pending, track_name) -> None:
             patch=pending.get("patch"),
             instrument_plugins=pending.get("plugins", []),
             notes=sorted(pending.get("notes", []), key=lambda n: n.start),
+            muted=pending.get("muted", False),
+            soloed=pending.get("soloed", False),
         )
     )
 
