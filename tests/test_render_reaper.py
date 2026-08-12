@@ -203,8 +203,28 @@ def test_silent_output_is_rejected(tmp_path):
         _write_tone(tmp_path / "song.flac", silent=True)
 
     settings = RenderReaperSettings(reaper_binary=_fake_reaper_binary(tmp_path))
-    with pytest.raises(RenderError, match="starts silent"):
+    with pytest.raises(RenderError, match="is silent"):
         render_project(rpp, settings=settings, runner=runner)
+
+
+def test_audio_with_a_long_silent_intro_is_not_rejected(tmp_path):
+    """A real corpus song ("Zombie") has 8.7s of legitimate quiet intro
+    before its first note -- past any short preview window, which once
+    flagged it as a failed render. The whole file must be checked, not
+    just its opening seconds."""
+    rpp = _rpp(tmp_path)
+
+    def runner(command, timeout):
+        path = tmp_path / "song.flac"
+        _write_tone(path, seconds=1.0, silent=True)
+        intro = sf.read(path, dtype="int16")[0]
+        _write_tone(path, seconds=1.0)
+        body = sf.read(path, dtype="int16")[0]
+        sf.write(path, np.concatenate([intro] * 10 + [body]), 44100, subtype="PCM_16")
+
+    settings = RenderReaperSettings(reaper_binary=_fake_reaper_binary(tmp_path))
+    output = render_project(rpp, settings=settings, runner=runner)
+    assert output.exists()
 
 
 def test_successful_render_returns_output_path(tmp_path):

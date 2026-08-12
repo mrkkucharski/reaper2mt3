@@ -153,12 +153,13 @@ def _validate_output(path: Path, settings: RenderReaperSettings) -> None:
             f"{path.name}: rendered at {info.samplerate} Hz, expected {settings.sample_rate}")
     if not info.frames:
         raise RenderError(f"{path.name}: rendered file has no audio frames")
-    # A few seconds is enough to catch total silence (a wrong render target,
-    # a muted master) without reading a potentially very large file in full.
-    preview_frames = min(info.frames, info.samplerate * 5)
-    samples, _ = sf.read(path, dtype="int16", frames=preview_frames)
+    # The whole file, matching dataset._check_audio's own silence check --
+    # a several-second preview isn't enough: a real corpus song ("Zombie")
+    # has 8.7s of legitimate quiet intro before its first note, well past a
+    # 5s preview window, and was flagged as a failed render for it.
+    samples, _ = sf.read(path, dtype="int16")
     if not samples.any():
-        raise RenderError(f"{path.name}: rendered audio starts silent -- render may have failed")
+        raise RenderError(f"{path.name}: rendered audio is silent -- render may have failed")
 
 
 def _lua_render_script(
