@@ -9,7 +9,8 @@ import json
 from argparse import Namespace
 from pathlib import Path
 
-from reaper2mt3.cli import _find_audio, _lint
+from reaper2mt3.cli import _find_audio, _lint, _render
+from reaper2mt3.render import RenderError
 
 
 def test_finds_wav(tmp_path):
@@ -116,3 +117,75 @@ def test_lint_collects_projects_from_a_directory(tmp_path, capsys):
     code = _lint(Namespace(projects=[tmp_path], vocabulary=None))
     assert code == 0
     assert "1 project(s) checked" in capsys.readouterr().out
+
+
+def _render_args(tmp_path, **overrides):
+    defaults = dict(
+        projects=[tmp_path / "song.RPP"],
+        out_dir=None,
+        format="flac",
+        sample_rate=44100,
+        channels=1,
+        reaper_binary=Path("/Applications/REAPER.app/Contents/MacOS/REAPER"),
+        timeout=300,
+        force=False,
+    )
+    defaults.update(overrides)
+    return Namespace(**defaults)
+
+
+def test_render_skips_existing_output_without_force(tmp_path, capsys, monkeypatch):
+    rpp = _write(tmp_path, _minimal_project(_minimal_track("drums")))
+    rpp.rename(tmp_path / "song.RPP")
+    (tmp_path / "song.flac").write_bytes(b"already rendered")
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("render_project should not run when the output already exists")
+
+    monkeypatch.setattr("reaper2mt3.cli.render_project_via_reaper", fail_if_called)
+    code = _render(_render_args(tmp_path))
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "SKIP" in out
+    assert "1 rendered, 1 skipped" not in out  # sanity: this is the 0-rendered path
+    assert "0 rendered, 1 skipped, 0 failed" in out
+
+
+def test_render_force_overwrites_existing_output(tmp_path, capsys, monkeypatch):
+    rpp = _write(tmp_path, _minimal_project(_minimal_track("drums")))
+    rpp.rename(tmp_path / "song.RPP")
+    output = tmp_path / "song.flac"
+    output.write_bytes(b"stale")
+
+    def fake_render(path, *, out_dir, settings, force):
+        output.write_bytes(b"fresh")
+        return output
+
+    monkeypatch.setattr("reaper2mt3.cli.render_project_via_reaper", fake_render)
+    code = _render(_render_args(tmp_path, force=True))
+    assert code == 0
+    assert output.read_bytes() == b"fresh"
+    assert "1 rendered, 0 skipped, 0 failed" in capsys.readouterr().out
+
+
+def test_render_reports_failure_and_nonzero_exit(tmp_path, capsys, monkeypatch):
+    rpp = _write(tmp_path, _minimal_project(_minimal_track("drums")))
+    rpp.rename(tmp_path / "song.RPP")
+
+    def fake_render(path, *, out_dir, settings, force):
+        raise RenderError("REAPER not found")
+
+    monkeypatch.setattr("reaper2mt3.cli.render_project_via_reaper", fake_render)
+    code = _render(_render_args(tmp_path))
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "FAIL" in out
+    assert "0 rendered, 0 skipped, 1 failed" in out
+
+
+def test_render_no_projects_found_errors(tmp_path, capsys):
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+    code = _render(_render_args(tmp_path, projects=[empty_dir]))
+    assert code == 2
+    assert "no REAPER projects found" in capsys.readouterr().err

@@ -20,6 +20,12 @@ from .dataset import (
 )
 from .finalization import load_finalization_input, preflight, provenance_record
 from .render import RenderError, RenderSettings, fluidsynth_version
+from .render_reaper import (
+    DEFAULT_REAPER_BINARY,
+    RenderReaperSettings,
+    output_path_for,
+    render_project as render_project_via_reaper,
+)
 from .rppread import read_project
 
 
@@ -58,6 +64,23 @@ def main(argv: list[str] | None = None) -> int:
                      help="procgen.reaper-render-provenance/v1 sidecar; supplies pinned "
                           "revisions, renderer aliases, and per-part event policy")
 
+    render = sub.add_parser(
+        "render",
+        help="headlessly render already-tuned REAPER projects to audio via REAPER itself "
+             "-- reaches real plugin chains build's FluidSynth path can't",
+    )
+    render.add_argument("projects", nargs="+", type=Path, help="RPP files or directories")
+    render.add_argument("--out-dir", type=Path,
+                        help="defaults to each project's own directory")
+    render.add_argument("--format", choices=["flac", "wav"], default="flac")
+    render.add_argument("--sample-rate", type=int, default=44100)
+    render.add_argument("--channels", type=int, default=1)
+    render.add_argument("--reaper-binary", type=Path, default=DEFAULT_REAPER_BINARY)
+    render.add_argument("--timeout", type=int, default=300,
+                        help="seconds to wait for one project before giving up")
+    render.add_argument("--force", action="store_true",
+                        help="remove an existing render first instead of skipping it")
+
     lint = sub.add_parser(
         "lint",
         help="check REAPER projects for non-canonical track names, "
@@ -74,6 +97,8 @@ def main(argv: list[str] | None = None) -> int:
         return _check(args)
     if args.command == "import":
         return _import(args)
+    if args.command == "render":
+        return _render(args)
     if args.command == "lint":
         return _lint(args)
     return _build(args)
@@ -233,6 +258,43 @@ def _import(args: argparse.Namespace) -> int:
     print(f"\n{len(examples)} example(s) imported to {args.out} "
           f"({clean} clean, {len(examples) - clean} with problems, {failures} failed)")
     return 1 if failures or clean != len(examples) else 0
+
+
+def _render(args: argparse.Namespace) -> int:
+    paths = _collect(args.projects)
+    if not paths:
+        print("no REAPER projects found", file=sys.stderr)
+        return 2
+
+    settings = RenderReaperSettings(
+        sample_rate=args.sample_rate,
+        channels=args.channels,
+        audio_format=args.format,
+        reaper_binary=args.reaper_binary,
+        timeout_seconds=args.timeout,
+    )
+
+    rendered = failures = skipped = 0
+    for path in paths:
+        existing = output_path_for(path, args.out_dir, args.format)
+        if existing.exists() and not args.force:
+            print(f"SKIP    {path.name[:60]:<60} {existing.name} already exists")
+            skipped += 1
+            continue
+        try:
+            output = render_project_via_reaper(
+                path, out_dir=args.out_dir, settings=settings, force=args.force)
+        except RenderError as error:
+            print(f"FAIL    {path.name}: {error}")
+            failures += 1
+            continue
+        size_mb = output.stat().st_size / 1e6
+        print(f"OK      {path.name[:60]:<60} -> {output.name} ({size_mb:.1f} MB)")
+        rendered += 1
+
+    print(f"\n{rendered} rendered, {skipped} skipped, {failures} failed "
+          f"(of {len(paths)} project(s))")
+    return 1 if failures else 0
 
 
 def _check(args: argparse.Namespace) -> int:

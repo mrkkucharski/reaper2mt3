@@ -34,6 +34,7 @@ Python 3.11+ and [uv](https://docs.astral.sh/uv/). Runtime dependencies are
 uv venv --python 3.11 .venv
 uv pip install --python .venv/bin/python -e .
 
+.venv/bin/reaper2mt3 render ../reaper/generated   # render tuned projects via REAPER itself
 .venv/bin/reaper2mt3 import ../reaper/generated -o ../data/pilot
 .venv/bin/reaper2mt3 check ../data/pilot          # re-run contract checks
 .venv/bin/reaper2mt3 lint ../reaper/generated --vocabulary vocabulary.json
@@ -59,6 +60,52 @@ data/pilot/
 A non-zero exit means at least one example failed a check; each failure names
 the `DATA_CONTRACT.md` check number that caught it. `--test-fraction` (default
 0.2) controls the split.
+
+### `render`: render tuned projects to audio via REAPER itself, headlessly
+
+`import` deliberately never synthesizes audio — but *something* has to
+produce the `.wav`/`.flac` it expects to find next to each `.RPP`, and doing
+that by hand in REAPER's GUI after every instrument edit doesn't scale. Every
+session that needed a fresh render after re-tuning a project's instruments
+had been re-deriving the same answer from scratch: drive REAPER's own command
+line with a short generated ReaScript, using the documented "render project,
+using the most recent render settings" action, instead of clicking through
+the Render dialog. `render` is that answer, made permanent:
+
+```sh
+.venv/bin/reaper2mt3 render Song.RPP another-batch/         # RPP files or directories
+.venv/bin/reaper2mt3 render Song.RPP --force                # overwrite an existing render
+.venv/bin/reaper2mt3 render Song.RPP --format wav --sample-rate 48000
+```
+
+For each project, launches a dedicated headless REAPER instance
+(`-newinst`, so it never touches a REAPER window you already have open),
+renders the *entire project as one mix* — matching what `import` expects,
+one audio file per RPP — to mono 16-bit FLAC at 44.1 kHz by default (this
+corpus's established format; both the FLAC and WAV format codes were
+extracted verbatim from a real project's own saved render settings, not
+guessed), then quits without ever prompting to save the source RPP. The
+result is validated the same way `check` validates an already-imported
+example (right channel count, right sample rate, not silent) before
+`render` reports success, so a broken render is caught immediately rather
+than surfacing later as a `check 6` failure after `import`.
+
+By default, an existing render is left alone and reported as `SKIP` —
+`--force` removes it first. Reaches real plugin-driven parts (Kontakt,
+Ample Sound, Guitar Rig — anything `midi2reaper`'s chain library spliced in)
+that `build`'s FluidSynth path below cannot: FluidSynth only ever renders an
+SFLT-backed part, since Pedalboard can't host SFLT and nothing else in this
+repo can drive a real plugin instance. If a project is already open in
+REAPER's own GUI when `render` tries it, the render can hang until
+`--timeout` (default 300s) — close the GUI window first.
+
+This intentionally does not import or depend on `procgen`'s own headless
+renderer (`procgen/src/procgen/renderers/reaper_worker.py`), which uses the
+same underlying REAPER technique but is built around procgen's own
+build-result/provenance contract and per-part stem rendering — machinery a
+hand-tuned real song's project doesn't carry and doesn't need. `render` here
+reimplements just the core technique, scoped to what this repo actually
+needs: one full mix per project.
 
 ### `lint`: check hand-curated projects before they're imported
 
@@ -162,8 +209,8 @@ Pedalboard cannot host SFLT (SFLT loads its soundfont only inside
 `initialize()`, before any state can be injected, and every state-injection
 route tried renders silence — see git history for the detail), so FluidSynth
 was the fallback for automated rendering. `import` is the workflow actually in
-use: rendering is done by hand in REAPER, with real instrument chains this
-path cannot reach.
+use: rendering is done in REAPER (by hand, or headlessly via `render` above),
+with real instrument chains this path cannot reach.
 
 `build`'s known limits, if used: what you audition in REAPER is not
 bit-identical to a FluidSynth render, since they're different synthesis
