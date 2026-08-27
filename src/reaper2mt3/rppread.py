@@ -151,9 +151,18 @@ def read_project(path: Path, *, strict_corpus_names: bool = False) -> Project:
                 time_signature = (int(bits[2]), int(bits[3]))
             if not tempo_points:
                 tempo_points.append((0.0, float(bits[1])))
-        elif stripped.startswith("PT "):
-            bits = stripped.split()
-            tempo_points.append((float(bits[0 + 1]), float(bits[2])))
+        elif stripped.startswith("<TEMPOENVEX"):
+            # PT lines are only tempo points inside this specific envelope
+            # chunk -- every other envelope (volume, pan, ...) also uses a
+            # bare "PT <time> <value> <shape>" line, and a global match on
+            # "PT " anywhere in the file previously picked those up too (e.g.
+            # a track's unity-gain <VOLENV2 ... PT 0 1 0 > was misread as a
+            # tempo point of 1 BPM at time 0, corrupting the whole envelope).
+            payload, i = _collect_chunk(lines, i)
+            for line in payload:
+                if line.startswith("PT "):
+                    bits = line.split()
+                    tempo_points.append((float(bits[1]), float(bits[2])))
         elif stripped.startswith("<TRACK "):
             _flush(parts, unparsed, invalid_corpus_names, pending, track_name,
                    strict_corpus_names)
