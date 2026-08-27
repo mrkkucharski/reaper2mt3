@@ -140,6 +140,18 @@ def test_import_flags_part_with_neither_soundfont_nor_chain(tmp_path):
     assert any("check 10" in p for p in example.problems)
 
 
+def test_import_live_recording_is_exempt_from_check_10(tmp_path):
+    """A real instrument captured outside REAPER has no chain to point to."""
+    rpp = write_rpp(tmp_path / "song.RPP")
+    wav = write_wav(tmp_path / "song.wav", seconds=1.0)
+    project = make_project([guitar_part(plugins=[])], path=rpp)
+
+    example = import_example(project, wav, tmp_path / "dataset", "ex_0001", "train", "r",
+                              live_recording=True)
+    assert not any("check 10" in p for p in example.problems)
+    assert example.record["live_recording"] is True
+
+
 @pytest.mark.parametrize("channels,sampwidth,rate", [(2, 2, 44100), (1, 3, 44100), (1, 2, 48000)])
 def test_import_flags_wav_that_does_not_meet_the_contract(tmp_path, channels, sampwidth, rate):
     rpp = write_rpp(tmp_path / "song.RPP")

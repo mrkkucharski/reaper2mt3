@@ -145,6 +145,7 @@ def import_example(
     split: str,
     renderer: str,
     pitch_exceptions: dict[str, dict] | None = None,
+    live_recording: bool = False,
 ) -> Example:
     """Pair a manually rendered audio file (WAV or FLAC) with labels from its project.
 
@@ -158,6 +159,11 @@ def import_example(
     "reason": "..."}}`. It is written into the manifest record verbatim, so the
     approval is auditable and travels with the data -- a later `reaper2mt3
     check` reads it back from the record rather than needing to be told again.
+
+    `live_recording` declares that the audio was captured from a real
+    instrument (guitar, amp, mic, interface) rather than synthesized inside
+    REAPER, so a part legitimately has no soundfont or plugin chain to point
+    to -- see DATA_CONTRACT.md check 10.
     """
     midi_path = Path("midi") / split / f"{example_id}.mid"
     corpus_audio_path = Path("audio") / split / f"{example_id}{audio_path.suffix}"
@@ -197,6 +203,7 @@ def import_example(
         "tail_seconds": round(duration_seconds - performance_seconds, 3),
         "normalization": "manual: REAPER master fader, no automated peak normalization",
         "approved_exceptions": pitch_exceptions or {},
+        "live_recording": live_recording,
     }
     return Example(example_id, split, record, validate_example(record, out_root))
 
@@ -237,10 +244,11 @@ def validate_example(record: dict, out_root: Path) -> list[str]:
         if part["track_name"] != expected:
             problems.append(f"check 2: {part['track_name']} is not canonical ({expected})")
 
-        # A part is driven by either an SFLT soundfont or a real instrument
-        # chain; check 10 verifies whichever one it actually has, and only
-        # flags a part with neither, since that means nothing is really
-        # producing its sound.
+        # A part is driven by an SFLT soundfont, a real instrument chain, or
+        # (declared via `live_recording`) a physical instrument outside
+        # REAPER entirely; check 10 verifies whichever one it actually has,
+        # and only flags a synthesized part with neither, since that means
+        # nothing is really producing its sound.
         if part["soundfont"] is not None:
             soundfont = Path(part["soundfont"])
             if not soundfont.exists():
@@ -254,8 +262,9 @@ def validate_example(record: dict, out_root: Path) -> list[str]:
                         f"check 10: {soundfont.name} lacks bank {part['bank']} patch {part['patch']}"
                     )
         elif not part.get("instrument_plugins"):
-            problems.append(f"check 10: {part['track_name']} has neither a soundfont "
-                            "nor an identifiable instrument chain")
+            if not record.get("live_recording"):
+                problems.append(f"check 10: {part['track_name']} has neither a soundfont "
+                                "nor an identifiable instrument chain")
 
     midi_path = out_root / record["midi_path"]
     audio_path = out_root / record["audio_path"]
