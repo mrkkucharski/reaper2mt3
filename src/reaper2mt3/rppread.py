@@ -18,9 +18,12 @@ from pathlib import Path
 from . import gm
 
 SFLT_MARKER = '<VST "VST3i: SFLT'
+AMPLE_MARKER = "Ample Sound"
 # REAPER breaks each base64 block into 128-character lines and closes the block
 # with a shorter one, which is how the three blocks are told apart.
 B64_LINE_WIDTH = 128
+_B64_CHARS = re.compile(r"^[A-Za-z0-9+/=]+$")
+_BEND_RANGE = re.compile(r'<Parameter Name="Bend Range" Value="([^"]*)"')
 _EVENT = re.compile(r"^[Ee]\s+(\d+)\s+([0-9a-fA-F]{2})\s+([0-9a-fA-F]{2})\s+([0-9a-fA-F]{2})\s*$")
 
 # A part is now identified by its track name, not by finding an SFLT instance:
@@ -66,6 +69,13 @@ class ProjectPart:
     muted: bool = False
     soloed: bool = False
     source_cc_count: int = 0
+    bend_count: int = 0
+    # Ample Sound plugins only: the instrument's own `Bend Range` parameter
+    # (semitones), read from its saved state. Ample's engine does not honour
+    # an incoming MIDI RPN Pitch Bend Sensitivity message -- this is the only
+    # thing that actually controls how far its wheel bends. None means no
+    # Ample plugin was found on this part, or its state couldn't be decoded.
+    bend_range: int | None = None
 
     @property
     def canonical_name(self) -> str:
@@ -187,6 +197,9 @@ def read_project(path: Path, *, strict_corpus_names: bool = False) -> Project:
             name = _plugin_name(stripped)
             if name:
                 pending.setdefault("plugins", []).append(name)
+                if AMPLE_MARKER in name:
+                    payload, i = _collect_chunk(lines, i)
+                    pending["bend_range"] = _decode_ample_bend_range(payload)
         elif stripped.startswith("HASDATA "):
             bits = stripped.split()
             if len(bits) >= 3 and bits[2].isdigit():
@@ -196,6 +209,7 @@ def read_project(path: Path, *, strict_corpus_names: bool = False) -> Project:
             notes, i = _read_events(lines, i, audit=audit)
             pending.setdefault("notes", []).extend(notes)
             pending["source_cc_count"] = pending.get("source_cc_count", 0) + audit.get("cc", 0)
+            pending["bend_count"] = pending.get("bend_count", 0) + audit.get("bends", 0)
 
         i += 1
 
@@ -244,6 +258,8 @@ def _flush(parts, unparsed, invalid_corpus_names, pending, track_name, strict_co
             muted=pending.get("muted", False),
             soloed=pending.get("soloed", False),
             source_cc_count=pending.get("source_cc_count", 0),
+            bend_count=pending.get("bend_count", 0),
+            bend_range=pending.get("bend_range"),
         )
     )
 
@@ -277,9 +293,19 @@ def _decode_state(payload: list[str]) -> dict:
 def _read_events(
     lines: list[str], start: int, audit: dict[str, int] | None = None,
 ) -> tuple[list[Note], int]:
-    """Consume a run of `E <delta> <status> <data1> <data2>` lines into notes."""
+    """Consume a run of `E <delta> <status> <data1> <data2>` lines into notes.
+
+    A pitch-bend (or other continuous-controller) event is often immediately
+    followed by an `ENV <shape> ...` line recording that same event's curve
+    interpolation shape, not a new event. An earlier version of this function
+    treated any non-matching line as the end of the run, so it silently
+    stopped at the first bend in an item and orphaned any note-on split from
+    its note-off across that point -- undercounting notes on every
+    bend-carrying item. `ENV` lines are now skipped in place instead.
+    """
     notes: list[Note] = []
     source_cc_count = 0
+    bend_count = 0
     # Merged parts stack identical pitches, so each (channel, pitch) holds a
     # queue and note-offs are matched first-in-first-out. A plain dict would
     # discard every note but the last of an overlapping run.
@@ -305,8 +331,50 @@ def _read_events(
                 notes.append(Note(begin, max(tick, begin + 1), pitch, velocity, channel))
         elif kind == 0xB0:
             source_cc_count += 1
+        elif kind == 0xE0:
+            bend_count += 1
+
         i += 1
+        if i < len(lines) and lines[i].strip().startswith("ENV"):
+            i += 1
 
     if audit is not None:
         audit["cc"] = source_cc_count
+        audit["bends"] = bend_count
     return notes, i - 1
+
+
+def _decode_ample_bend_range(payload: list[str]) -> int | None:
+    """Ample Sound plugins save readable XML state (unlike SFLT's binary
+    JSON-in-base64 layout): a `Bend Range` parameter, in semitones, is the
+    instrument's own bend-wheel scaling and is not driven by any incoming
+    MIDI RPN Pitch Bend Sensitivity message. Multiple base64 blocks can be
+    present (REAPER closes each at the first line under `B64_LINE_WIDTH`);
+    the state XML is the largest one, so decode all and keep the biggest.
+    """
+    blocks: list[str] = []
+    current: list[str] = []
+    for line in payload:
+        if _B64_CHARS.match(line):
+            current.append(line)
+            if len(line) < B64_LINE_WIDTH:
+                blocks.append("".join(current))
+                current = []
+        elif current:
+            blocks.append("".join(current))
+            current = []
+    if current:
+        blocks.append("".join(current))
+
+    best: bytes | None = None
+    for block in blocks:
+        try:
+            data = base64.b64decode(block)
+        except ValueError:
+            continue
+        if best is None or len(data) > len(best):
+            best = data
+    if best is None:
+        return None
+    match = _BEND_RANGE.search(best.decode("utf-8", errors="replace"))
+    return int(match.group(1)) if match else None
