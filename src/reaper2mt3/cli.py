@@ -27,7 +27,7 @@ from .render_reaper import (
     render_project as render_project_via_reaper,
 )
 from . import noteqa, slides
-from .rppread import AMPLE_MARKER, read_project
+from .rppread import AMPLE_GUITAR_MARKER, AMPLE_MARKER, read_project
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -424,6 +424,18 @@ def _lint(args: argparse.Namespace) -> int:
                         f"Ample instrument bend range is {seen}, not 12: "
                         f"{part.canonical_name} ({part.track_name[:60]}), "
                         f"{part.bend_count} bend event(s)")
+
+                # Ample Guitar (not Bass) also needs Poly Bender on, or bent
+                # notes don't retrigger/overlap correctly -- separate from
+                # Bend Range, which only scales how far the wheel travels.
+                if any(AMPLE_GUITAR_MARKER in p for p in part.instrument_plugins):
+                    if not part.poly_bender:
+                        seen = ("unknown" if part.poly_bender is None
+                               else str(part.poly_bender))
+                        problems.append(
+                            f"Ample Guitar Poly Bender is off ({seen}): "
+                            f"{part.canonical_name} ({part.track_name[:60]}), "
+                            f"{part.bend_count} bend event(s)")
 
         # Guitar-Pro slide ramps. A failure, not a warning: these silently
         # teach the model to over-emit notes, and a warning would be

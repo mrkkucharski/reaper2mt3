@@ -19,11 +19,13 @@ from . import gm
 
 SFLT_MARKER = '<VST "VST3i: SFLT'
 AMPLE_MARKER = "Ample Sound"
+AMPLE_GUITAR_MARKER = "Ample Guitar"  # excludes Ample Bass, which shares the state format
 # REAPER breaks each base64 block into 128-character lines and closes the block
 # with a shorter one, which is how the three blocks are told apart.
 B64_LINE_WIDTH = 128
 _B64_CHARS = re.compile(r"^[A-Za-z0-9+/=]+$")
 _BEND_RANGE = re.compile(r'<Parameter Name="Bend Range" Value="([^"]*)"')
+_POLY_BENDER = re.compile(r'<Parameter Name="Poly Bender Tog" Value="([^"]*)"')
 _EVENT = re.compile(r"^[Ee]\s+(\d+)\s+([0-9a-fA-F]{2})\s+([0-9a-fA-F]{2})\s+([0-9a-fA-F]{2})\s*$")
 
 # A part is now identified by its track name, not by finding an SFLT instance:
@@ -76,6 +78,10 @@ class ProjectPart:
     # thing that actually controls how far its wheel bends. None means no
     # Ample plugin was found on this part, or its state couldn't be decoded.
     bend_range: int | None = None
+    # Ample Guitar plugins only (not Ample Bass): the `Poly Bender Tog`
+    # parameter. None means no Ample Guitar plugin was found, or the state
+    # couldn't be decoded.
+    poly_bender: bool | None = None
 
     @property
     def canonical_name(self) -> str:
@@ -199,7 +205,11 @@ def read_project(path: Path, *, strict_corpus_names: bool = False) -> Project:
                 pending.setdefault("plugins", []).append(name)
                 if AMPLE_MARKER in name:
                     payload, i = _collect_chunk(lines, i)
-                    pending["bend_range"] = _decode_ample_bend_range(payload)
+                    text = _decode_ample_state_text(payload)
+                    pending["bend_range"] = _extract_int(text, _BEND_RANGE)
+                    if AMPLE_GUITAR_MARKER in name:
+                        poly = _extract_int(text, _POLY_BENDER)
+                        pending["poly_bender"] = None if poly is None else bool(poly)
         elif stripped.startswith("HASDATA "):
             bits = stripped.split()
             if len(bits) >= 3 and bits[2].isdigit():
@@ -260,6 +270,7 @@ def _flush(parts, unparsed, invalid_corpus_names, pending, track_name, strict_co
             source_cc_count=pending.get("source_cc_count", 0),
             bend_count=pending.get("bend_count", 0),
             bend_range=pending.get("bend_range"),
+            poly_bender=pending.get("poly_bender"),
         )
     )
 
@@ -344,11 +355,11 @@ def _read_events(
     return notes, i - 1
 
 
-def _decode_ample_bend_range(payload: list[str]) -> int | None:
+def _decode_ample_state_text(payload: list[str]) -> str | None:
     """Ample Sound plugins save readable XML state (unlike SFLT's binary
-    JSON-in-base64 layout): a `Bend Range` parameter, in semitones, is the
-    instrument's own bend-wheel scaling and is not driven by any incoming
-    MIDI RPN Pitch Bend Sensitivity message. Multiple base64 blocks can be
+    JSON-in-base64 layout) -- e.g. `Bend Range` (semitones, the instrument's
+    own bend-wheel scaling, not driven by any incoming MIDI RPN Pitch Bend
+    Sensitivity message) and `Poly Bender Tog`. Multiple base64 blocks can be
     present (REAPER closes each at the first line under `B64_LINE_WIDTH`);
     the state XML is the largest one, so decode all and keep the biggest.
     """
@@ -374,7 +385,11 @@ def _decode_ample_bend_range(payload: list[str]) -> int | None:
             continue
         if best is None or len(data) > len(best):
             best = data
-    if best is None:
+    return best.decode("utf-8", errors="replace") if best is not None else None
+
+
+def _extract_int(text: str | None, pattern: re.Pattern) -> int | None:
+    if text is None:
         return None
-    match = _BEND_RANGE.search(best.decode("utf-8", errors="replace"))
+    match = pattern.search(text)
     return int(match.group(1)) if match else None
