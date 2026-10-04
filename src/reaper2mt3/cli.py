@@ -27,7 +27,12 @@ from .render_reaper import (
     render_project as render_project_via_reaper,
 )
 from . import noteqa, slides
-from .rppread import AMPLE_GUITAR_MARKER, AMPLE_MARKER, read_project
+from .rppread import (
+    AMPLE_GUITAR_MARKER,
+    AMPLE_MARKER,
+    PITCH_BEND_RANGE_SEMITONES,
+    read_project,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -436,6 +441,21 @@ def _lint(args: argparse.Namespace) -> int:
                             f"Ample Guitar Poly Bender is off ({seen}): "
                             f"{part.canonical_name} ({part.track_name[:60]}), "
                             f"{part.bend_count} bend event(s)")
+
+            # Independent of which instrument is loaded (an Ample plugin's
+            # own Bend Range parameter above is a different, playback-only
+            # setting it never reads this RPN from): every bend event needs
+            # an RPN 0,0=12 declaration (CC 101=0, 100=0, 6=12) in effect on
+            # its channel, or mt3/scripts/build_guitar_pilot_tfrecord.py
+            # rejects it outright when splicing real bend data into a
+            # training example (PROJECT_LOG.md, 2026-10-04 -- a hand-drawn
+            # bend in REAPER doesn't get this declaration for free; only
+            # scripts/generate_bend_gestures.py and `fix-slides` add it).
+            if part.bends_missing_rpn:
+                problems.append(
+                    f"{part.bends_missing_rpn}/{part.bend_count} bend event(s) missing "
+                    f"an RPN 0,0={PITCH_BEND_RANGE_SEMITONES} semitone declaration: "
+                    f"{part.canonical_name} ({part.track_name[:60]})")
 
         # Guitar-Pro slide ramps. A failure, not a warning: these silently
         # teach the model to over-emit notes, and a warning would be

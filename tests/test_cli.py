@@ -119,6 +119,43 @@ def test_lint_collects_projects_from_a_directory(tmp_path, capsys):
     assert "1 project(s) checked" in capsys.readouterr().out
 
 
+def _track_with_midi_item(name: str, notes: str) -> str:
+    return "\n".join([
+        "  <TRACK {G}",
+        f'    NAME "{name}"',
+        "    MUTESOLO 0 0 0",
+        "    <ITEM",
+        "      <SOURCE MIDI",
+        "        HASDATA 1 480 QN",
+        notes,
+        "      >",
+        "    >",
+        "  >",
+    ])
+
+
+def test_lint_flags_bend_missing_rpn_declaration(tmp_path, capsys):
+    """A hand-drawn bend with no RPN 0,0=12 declaration is exactly what
+    niepokonani.RPP was missing (PROJECT_LOG.md, 2026-10-04) -- caught here,
+    before it reaches mt3/scripts/build_guitar_pilot_tfrecord.py, which
+    rejects it outright at TFRecord-build time instead."""
+    notes = "        E 0 90 3c 64\n        E 100 e0 00 50\n        E 380 80 3c 00"
+    rpp = _write(tmp_path, _minimal_project(_track_with_midi_item("distortion-guitar", notes)))
+    code = _lint(Namespace(projects=[rpp], vocabulary=None))
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "1/1 bend event(s) missing an RPN 0,0=12 semitone declaration" in out
+
+
+def test_lint_allows_bend_with_rpn_declaration(tmp_path, capsys):
+    notes = ("        E 0 b0 65 00\n        E 0 b0 64 00\n        E 0 b0 06 0c\n"
+             "        E 0 90 3c 64\n        E 100 e0 00 50\n        E 380 80 3c 00")
+    rpp = _write(tmp_path, _minimal_project(_track_with_midi_item("distortion-guitar", notes)))
+    code = _lint(Namespace(projects=[rpp], vocabulary=None))
+    assert code == 0
+    assert "0 problem(s)" in capsys.readouterr().out
+
+
 def _render_args(tmp_path, **overrides):
     defaults = dict(
         projects=[tmp_path / "song.RPP"],

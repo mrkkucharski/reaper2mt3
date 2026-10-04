@@ -182,3 +182,42 @@ def test_soloed_track_is_reported(tmp_path):
 
     assert project.parts[0].muted is False
     assert project.parts[0].soloed is True
+
+
+def test_bend_without_rpn_declaration_is_flagged(tmp_path):
+    """A hand-drawn bend in REAPER doesn't get the RPN 0,0=12 declaration for
+    free (only scripts/generate_bend_gestures.py and `fix-slides` add it) --
+    this is exactly what niepokonani.RPP was missing (PROJECT_LOG.md,
+    2026-10-04), and mt3/scripts/build_guitar_pilot_tfrecord.py rejects it
+    outright at TFRecord-build time rather than mislabeling it."""
+    notes = "        E 0 90 3c 64\n        E 100 e0 00 50\n        E 380 80 3c 00"
+    text = _project(_track("distortion-guitar", CHAIN_CHUNK, notes))
+    project = read_project(_write(tmp_path, text))
+
+    part = project.parts[0]
+    assert part.bend_count == 1
+    assert part.bends_missing_rpn == 1
+
+
+def test_bend_with_rpn_declaration_is_not_flagged(tmp_path):
+    notes = ("        E 0 b0 65 00\n        E 0 b0 64 00\n        E 0 b0 06 0c\n"
+             "        E 0 90 3c 64\n        E 100 e0 00 50\n        E 380 80 3c 00")
+    text = _project(_track("distortion-guitar", CHAIN_CHUNK, notes))
+    project = read_project(_write(tmp_path, text))
+
+    part = project.parts[0]
+    assert part.bend_count == 1
+    assert part.bends_missing_rpn == 0
+
+
+def test_bend_with_wrong_declared_range_is_flagged(tmp_path):
+    """A declaration for any range other than the fixed pb12 vocabulary's 12
+    semitones is just as unusable as no declaration at all."""
+    notes = ("        E 0 b0 65 00\n        E 0 b0 64 00\n        E 0 b0 06 02\n"
+             "        E 0 90 3c 64\n        E 100 e0 00 50\n        E 380 80 3c 00")
+    text = _project(_track("distortion-guitar", CHAIN_CHUNK, notes))
+    project = read_project(_write(tmp_path, text))
+
+    part = project.parts[0]
+    assert part.bend_count == 1
+    assert part.bends_missing_rpn == 1

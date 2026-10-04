@@ -27,6 +27,15 @@ _B64_CHARS = re.compile(r"^[A-Za-z0-9+/=]+$")
 _BEND_RANGE = re.compile(r'<Parameter Name="Bend Range" Value="([^"]*)"')
 _POLY_BENDER = re.compile(r'<Parameter Name="Poly Bender Tog" Value="([^"]*)"')
 _EVENT = re.compile(r"^[Ee]\s+(\d+)\s+([0-9a-fA-F]{2})\s+([0-9a-fA-F]{2})\s+([0-9a-fA-F]{2})\s*$")
+# mt3.vocabularies.PITCH_BEND_RANGE_SEMITONES: the fixed full-scale range the
+# pb12 vocabulary assumes every bend event means, regardless of what an
+# instrument plugin's own Bend Range parameter says (Ample ignores this RPN
+# message entirely at playback -- see AMPLE_MARKER above). A bend not preceded
+# by this exact RPN 0,0 declaration on its channel carries no reliable
+# semitone meaning and is exactly what
+# mt3/scripts/build_guitar_pilot_tfrecord.py's own reader rejects at
+# TFRecord-build time (PROJECT_LOG.md, 2026-10-04) -- lint catches it first.
+PITCH_BEND_RANGE_SEMITONES = 12
 
 # A part is now identified by its track name, not by finding an SFLT instance:
 # midi2reaper splices real instrument FX chains (Kontakt, Guitar Rig, Ample
@@ -72,6 +81,13 @@ class ProjectPart:
     soloed: bool = False
     source_cc_count: int = 0
     bend_count: int = 0
+    # Bend events whose channel had no active RPN 0,0=12 declaration (CC
+    # 101=0, 100=0, 6=12) in effect at the time -- the corpus-side contract
+    # mt3/scripts/build_guitar_pilot_tfrecord.py enforces when splicing real
+    # bend data into a training example, independent of and not satisfied by
+    # bend_range below (an Ample plugin's own state, which it never reads
+    # from this RPN message at playback).
+    bends_missing_rpn: int = 0
     # Ample Sound plugins only: the instrument's own `Bend Range` parameter
     # (semitones), read from its saved state. Ample's engine does not honour
     # an incoming MIDI RPN Pitch Bend Sensitivity message -- this is the only
@@ -220,6 +236,8 @@ def read_project(path: Path, *, strict_corpus_names: bool = False) -> Project:
             pending.setdefault("notes", []).extend(notes)
             pending["source_cc_count"] = pending.get("source_cc_count", 0) + audit.get("cc", 0)
             pending["bend_count"] = pending.get("bend_count", 0) + audit.get("bends", 0)
+            pending["bends_missing_rpn"] = (
+                pending.get("bends_missing_rpn", 0) + audit.get("bends_missing_rpn", 0))
 
         i += 1
 
@@ -269,6 +287,7 @@ def _flush(parts, unparsed, invalid_corpus_names, pending, track_name, strict_co
             soloed=pending.get("soloed", False),
             source_cc_count=pending.get("source_cc_count", 0),
             bend_count=pending.get("bend_count", 0),
+            bends_missing_rpn=pending.get("bends_missing_rpn", 0),
             bend_range=pending.get("bend_range"),
             poly_bender=pending.get("poly_bender"),
         )
@@ -317,6 +336,14 @@ def _read_events(
     notes: list[Note] = []
     source_cc_count = 0
     bend_count = 0
+    bends_missing_rpn = 0
+    # Per-channel RPN-0 (Pitch Bend Sensitivity) state, reset at the start of
+    # each item: REAPER closes and reopens this exact sequence per item, and
+    # mt3/scripts/build_guitar_pilot_tfrecord.py's own reader (the thing a
+    # missing declaration actually breaks) resets the same way.
+    rpn_msb: dict[int, int] = {}
+    rpn_lsb: dict[int, int] = {}
+    declared_range: dict[int, int] = {}
     # Merged parts stack identical pitches, so each (channel, pitch) holds a
     # queue and note-offs are matched first-in-first-out. A plain dict would
     # discard every note but the last of an overlapping run.
@@ -342,8 +369,16 @@ def _read_events(
                 notes.append(Note(begin, max(tick, begin + 1), pitch, velocity, channel))
         elif kind == 0xB0:
             source_cc_count += 1
+            if pitch == 101:
+                rpn_msb[channel] = value
+            elif pitch == 100:
+                rpn_lsb[channel] = value
+            elif pitch == 6 and rpn_msb.get(channel) == 0 and rpn_lsb.get(channel) == 0:
+                declared_range[channel] = value
         elif kind == 0xE0:
             bend_count += 1
+            if declared_range.get(channel) != PITCH_BEND_RANGE_SEMITONES:
+                bends_missing_rpn += 1
 
         i += 1
         if i < len(lines) and lines[i].strip().startswith("ENV"):
@@ -352,6 +387,7 @@ def _read_events(
     if audit is not None:
         audit["cc"] = source_cc_count
         audit["bends"] = bend_count
+        audit["bends_missing_rpn"] = bends_missing_rpn
     return notes, i - 1
 
 
